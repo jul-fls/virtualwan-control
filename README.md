@@ -308,7 +308,7 @@ Elles ne créent pas à elles seules un profil complet.
 
 Sur un volume Docker neuf, le fichier /data/ssh-known-hosts n’existe pas encore.
 Dans Routeurs → Configurer → Vérifier clé SSH PVE (puis routeur), comparer
-l’empreinte à celle de la console de l’hôte et la saisir pour l’enregistrer.
+l’empreinte à celle de la console de l’hôte puis saisir ACCEPTER pour l’enregistrer.
 La présence d’un mot de passe n’autorise pas automatiquement une clé hôte.
 Ensuite, relancer Lire les VM ; les erreurs signalent cette étape manquante.
 Conserver /data sur le volume persistant. Après changement d’environnement,
