@@ -242,6 +242,8 @@ class Control:
                         if secret:env[value]=secret
         env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip();cfg['backup_key_env']='VWAN_BACKUP_KEY'
         cfg['pve']['known_hosts']=str(self.store.root/'ssh-known-hosts')
+        from .adapters.provision import require_ssh_host_key
+        require_ssh_host_key(cfg['pve'])
         if cfg['pve'].get('private_key'):
             path=(self.store.root/cfg['pve']['private_key']).resolve()
             if not path.is_relative_to(self.store.root):raise ValueError('Clé SSH hors du volume privé.')

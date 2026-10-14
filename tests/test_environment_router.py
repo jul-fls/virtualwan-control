@@ -10,6 +10,7 @@ from virtualwan.store import Store
 from virtualwan.web import create_app
 from virtualwan import domain
 from virtualwan.adapters import remote
+from virtualwan.adapters.provision import require_ssh_host_key
 
 ROOT=Path(__file__).parents[1]
 TESTROOT=Path(os.environ.get('VWAN_TEST_TMPDIR',ROOT/'data'))
@@ -90,6 +91,48 @@ class EnvironmentRouterTests(unittest.TestCase):
         with patch.object(remote,'run',return_value=json.dumps([{'prefsrc':'8.8.8.8','dev':'ens3'}])),patch.object(remote.Path,'read_text',return_value='ID=debian\nVERSION_ID="13"'),patch.object(remote.Path,'exists',return_value=True),patch.object(remote.subprocess,'run') as command:
             with self.assertRaises(ValueError):remote.router_bootstrap({'router':{'primary_ip':'8.8.8.8'}})
             command.assert_not_called()
+
+
+class ConnectionOverrideTests(unittest.TestCase):
+    setUp=EnvironmentRouterTests.setUp
+    tearDown=EnvironmentRouterTests.tearDown
+    # Keep this class separate to exercise both declarative and existing-store paths.
+    def test_connections_override_json_values(self):
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile]),'VWAN_PVE_HOST':'192.168.2.22','VWAN_PVE_PORT':'2222','VWAN_PFSENSE_URL':'https://pf.example.net'}):
+            apply_environment(self.control)
+        c=self.store.document('profiles','router-test')['config']
+        self.assertEqual(c['pve']['host'],'192.168.2.22');self.assertEqual(c['pve']['port'],2222)
+        self.assertEqual(c['pfsense']['url'],'https://pf.example.net')
+        self.assertEqual(self.profile['config']['pve']['host'],'192.168.1.10')
+    def test_connections_override_existing_profile_without_json(self):
+        key=self.control.add_profile(self.profile)
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':'[]','VWAN_PVE_HOST':'192.168.2.22'}):apply_environment(self.control)
+        self.assertEqual(self.store.document('profiles',key)['config']['pve']['host'],'192.168.2.22')
+    def test_multiple_profiles_require_selector(self):
+        other=json.loads(json.dumps(self.profile));other['id']='other-router'
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile,other]),'VWAN_PVE_HOST':'192.168.2.22','VWAN_PROFILE_ID':''}):
+            with self.assertRaisesRegex(ValueError,'Plusieurs routeurs'):apply_environment(self.control)
+    def test_recorded_host_key_is_accepted(self):
+        import paramiko
+        p=Path(self.tmp.name)/'known';hosts=paramiko.HostKeys()
+        hosts.add('192.168.1.10','ssh-rsa',paramiko.RSAKey.generate(1024));hosts.save(str(p))
+        require_ssh_host_key({'host':'192.168.1.10','port':22,'known_hosts':str(p)})
+    def test_http_firewall_override_rejected(self):
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile]),'VWAN_PFSENSE_URL':'http://pf.example.net'}):
+            with self.assertRaises(ValueError):apply_environment(self.control)
+    def test_port_override_rejected(self):
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile]),'VWAN_PVE_PORT':'70000'}):
+            with self.assertRaises(ValueError):apply_environment(self.control)
+    def test_unknown_profile_selector_rejected(self):
+        with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile]),'VWAN_PVE_HOST':'192.168.2.22','VWAN_PROFILE_ID':'missing'}):
+            with self.assertRaises(ValueError):apply_environment(self.control)
+    def test_missing_host_keys_has_actionable_message(self):
+        with self.assertRaisesRegex(ValueError,'Vérifier clé SSH PVE'):
+            require_ssh_host_key({'host':'192.168.1.10','port':22,'known_hosts':str(Path(self.tmp.name)/'missing')})
+    def test_empty_host_keys_remain_untrusted(self):
+        p=Path(self.tmp.name)/'known';p.write_text('')
+        with self.assertRaisesRegex(ValueError,'non enregistrée'):
+            require_ssh_host_key({'host':'192.168.1.10','port':22,'known_hosts':str(p)})
 
 
 if __name__=='__main__':unittest.main()

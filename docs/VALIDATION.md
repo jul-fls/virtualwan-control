@@ -111,3 +111,11 @@ Distribution now uses the repository root as Docker context. Pipeline reduced
 to checkout/login/build/push with the single image tag latest, no Python matrix
 and no pinned action revisions. PRs build without login/push. The earlier matrix
 workflow description is superseded; local test results remain separate from CI.
+
+## Connection overrides and SSH trust messages
+
+Dedicated pfSense URL/connect IP and PVE host/port/node/username variables apply
+to the selected profile, with explicit selection required for multiple profiles.
+The SSH preflight now reports the UI enrollment action before spawning PVE
+inventory when the host-key file/key is missing. RejectPolicy remains enabled.
+This change was tested locally without contacting pfSense, PVE or the router.

@@ -296,3 +296,21 @@ Sources : [limite Additional IP OVH](https://www.ovhcloud.com/fr/vps/vps-ip/),
 [nftables bridge](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering),
 [Cloud-init Proxmox](https://pve.proxmox.com/pve-docs/chapter-qm.html#qm_cloud_init),
 [Waitress](https://flask.palletsprojects.com/en/stable/deploying/waitress/).
+
+## Connexions simples et première clé SSH
+
+Les variables VWAN_PFSENSE_URL, VWAN_PFSENSE_CONNECT_IP, VWAN_PVE_HOST,
+VWAN_PVE_PORT, VWAN_PVE_NODE et VWAN_PVE_USERNAME remplacent les champs
+correspondants d’un profil au démarrage. Avec un seul profil, celui-ci est
+sélectionné automatiquement ; avec plusieurs, fournir son id dans VWAN_PROFILE_ID.
+Elles s’appliquent au JSON initial ou au profil déjà enregistré si le JSON est vide.
+Elles ne créent pas à elles seules un profil complet.
+
+Sur un volume Docker neuf, le fichier /data/ssh-known-hosts n’existe pas encore.
+Dans Routeurs → Configurer → Vérifier clé SSH PVE (puis routeur), comparer
+l’empreinte à celle de la console de l’hôte et la saisir pour l’enregistrer.
+La présence d’un mot de passe n’autorise pas automatiquement une clé hôte.
+Ensuite, relancer Lire les VM ; les erreurs signalent cette étape manquante.
+Conserver /data sur le volume persistant. Après changement d’environnement,
+recréer le conteneur pour charger les valeurs (un simple restart ne recharge
+pas le fichier .env).

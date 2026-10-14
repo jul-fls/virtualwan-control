@@ -95,9 +95,20 @@ class Journal:
         self.event('backup.saved', path=str(path), plaintext_sha256=hashlib.sha256(data).hexdigest())
 
 
+def require_ssh_host_key(cfg):
+    path=Path(cfg['known_hosts'])
+    if not path.is_file():
+        raise ValueError('Clés hôtes SSH absentes. Dans Routeurs → Configurer, utiliser « Vérifier clé SSH PVE » ou « Vérifier clé SSH routeur », comparer l’empreinte avec la console du serveur puis l’enregistrer.')
+    name=cfg['host'] if int(cfg.get('port',22))==22 else f"[{cfg['host']}]:{cfg['port']}"
+    hosts=paramiko.HostKeys(str(path))
+    if not hosts.lookup(name):
+        raise ValueError('Clé SSH non enregistrée pour '+name+'. Dans Routeurs → Configurer, vérifier puis enregistrer la clé SSH du serveur cible.')
+
+
 class Remote:
     def __init__(self, cfg, journal):
         self.cfg, self.log = cfg, journal
+        require_ssh_host_key(cfg)
         self.ssh = paramiko.SSHClient()
         self.ssh.load_host_keys(cfg['known_hosts'])
         self.ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
