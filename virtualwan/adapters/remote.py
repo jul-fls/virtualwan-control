@@ -25,6 +25,17 @@ def run(*args, input=None):
     return p.stdout
 
 
+def reload_virtualwan():
+    try:return run('systemctl','reload','virtualwan')
+    except Exception as error:
+        try:
+            journal=subprocess.run(['journalctl','-u','virtualwan.service','--since','-2min','-n','80','--no-pager','-o','cat'],text=True,capture_output=True,timeout=15)
+            detail=re.sub(r'(?im)(private\s*key\s*[=:]\s*)[^\r\n]+',r'\1[REDACTED]',journal.stdout[-12000:])
+            audit('vps.reload.failed',service_journal=detail,journal_exit_code=journal.returncode)
+        except Exception:detail='Service journal unavailable'
+        raise RuntimeError('virtualwan.service reload failed: '+str(error)+'\n'+detail) from error
+
+
 def api(p, resource):
     return json.loads(run('pvesh', 'get', f'/nodes/{p["node"]}/{resource}', '--output-format', 'json'))
 
@@ -231,46 +242,45 @@ def main():
                 run(*cmd)
             emit({'unregistered':True,'vmid':vmid})
     elif action == 'vps_apply':
-        path = Path(q['path'])
-        before = path.read_bytes()
-        c = json.loads(before)
-        assert c['primary_ip'] == q['primary_ip']
-        ipaddress.IPv4Address(q['ip'])
-        prior_route = run('ip', '-4', 'route', 'get', '1.1.1.1')
-        assert f'src {q["primary_ip"]}' in prior_route
-        if q['ip'] in c['additional_ips']:
-            emit({'unchanged': True, 'config': c, 'route': prior_route})
-            return
-        backup = Path('/var/lib/virtualwan/runs') / q['run_id']
-        backup.mkdir(parents=True, mode=0o700, exist_ok=False)
-        (backup / 'vps-config.before.json').write_bytes(before)
-        os.chmod(backup / 'vps-config.before.json', 0o600)
-        audit('vps.backup.saved', path=str(backup / 'vps-config.before.json'))
-        c['additional_ips'].append(q['ip'])
-        if 'inactive_ips' in c:c['inactive_ips']=[ip for ip in c['inactive_ips'] if ip!=q['ip']]
-        fd, temp = tempfile.mkstemp(dir=path.parent, prefix='.virtualwan-')
+        import base64
+        path=Path(q['path']);before=path.read_bytes();c=json.loads(before)
+        ip=str(ipaddress.IPv4Address(q['ip']))
+        if c['primary_ip']!=q['primary_ip'] or ip==q['primary_ip']:raise ValueError('Additional IP or primary mismatch')
+        prior_route=run('ip','-4','route','get','1.1.1.1')
+        if f'src {q["primary_ip"]}' not in prior_route:raise ValueError('Management source mismatch')
+        backup=Path('/var/lib/virtualwan/runs')/q['run_id'];backup.mkdir(parents=True,mode=0o700,exist_ok=False)
+        (backup/'vps-config.before.json').write_bytes(before);(backup/'vps-config.before.json').chmod(0o600)
+        binary=Path('/usr/local/sbin/virtualwan');original=None;source=None
+        if q.get('source_base64'):
+            original=binary.read_bytes()
+            if b'def firewall(' not in original or b'wg-vwan' not in original or b'virtualwan' not in original:raise ValueError('Unknown router executable')
+            source=base64.b64decode(q['source_base64'],validate=True)
+            if hashlib.sha256(source).hexdigest()!=q['source_sha256']:raise ValueError('Router executable digest mismatch')
+            compile(source.decode('utf-8'),str(binary),'exec')
+            (backup/'router.before.py').write_bytes(original);(backup/'router.before.py').chmod(0o600)
+        if ip not in c['additional_ips']:c['additional_ips'].append(ip)
+        if 'inactive_ips' in c:c['inactive_ips']=[x for x in c['inactive_ips'] if x!=ip]
+        fd,temp=tempfile.mkstemp(dir=path.parent,prefix='.virtualwan-')
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(c, f, indent=2)
-                f.write('\n')
-            run('virtualwan', 'validate', '--config', temp)
-            audit('vps.config.replace.begin', path=str(path), before=json.loads(before), after=c)
-            os.replace(temp, path)
-            audit('vps.config.replace.end', path=str(path))
-            try:
-                run('systemctl', 'reload', 'virtualwan')
-                route = run('ip', '-4', 'route', 'get', '1.1.1.1')
-                assert f'src {q["primary_ip"]}' in route
-            except Exception:
-                audit('vps.rollback.begin', path=str(path))
-                path.write_bytes(before)
-                run('systemctl', 'reload', 'virtualwan')
-                audit('vps.rollback.end', path=str(path))
-                raise
+            with os.fdopen(fd,'w') as f:json.dump(c,f);f.write('\n')
+            if source is not None:
+                binary.write_bytes(source);binary.chmod(0o700)
+                audit('vps.router.updated',source_sha256=q['source_sha256'],backup=str(backup/'router.before.py'))
+            run(str(binary),'validate','--config',temp)
+            audit('vps.config.replace.begin',path=str(path),before=json.loads(before),after=c)
+            os.replace(temp,path);audit('vps.config.replace.end',path=str(path))
+            reload_virtualwan()
+            route=run('ip','-4','route','get','1.1.1.1')
+            if route!=prior_route:
+                if f'src {q["primary_ip"]}' not in route:raise ValueError('Management source changed')
+        except Exception:
+            audit('vps.rollback.begin',path=str(path))
+            if original is not None:binary.write_bytes(original);binary.chmod(0o700)
+            path.write_bytes(before);reload_virtualwan();audit('vps.rollback.end',path=str(path))
+            raise
         finally:
-            if os.path.exists(temp):
-                os.unlink(temp)
-        emit({'config': c, 'route': route, 'backup': str(backup)})
+            if os.path.exists(temp):os.unlink(temp)
+        emit({'config':c,'route':route,'backup':str(backup),'router_updated':source is not None})
     elif action == 'pve_inventory':
         assert run('hostname','-s').strip()==p['node']
         registry=json.loads(Path('/etc/pve/virtualwan-isolation.json').read_text())

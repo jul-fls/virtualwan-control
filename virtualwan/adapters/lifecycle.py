@@ -9,6 +9,17 @@ from .pfsense import PfSense
 from ..hostnames import stock_hostname
 
 
+def check_aliases(cf,ip,fqdn,client,log,preflight=False,legacy_name=None):
+    removable={client.get('fqdn'),legacy_name}
+    aliases=cf.records_for_ip(ip)
+    conflicts=[r for r in aliases if r['name'].lower().rstrip('.')!=fqdn.lower().rstrip('.') and not (
+        preflight and r['name'] in removable and r.get('comment')=='Virtualwan managed')]
+    if conflicts:
+        detail=[{'name':r['name'],'content':r['content'],'id':r['id'],'managed':r.get('comment')=='Virtualwan managed'} for r in conflicts]
+        log.event('dns.release.alias_conflict',ip=ip,stock_hostname=fqdn,records=detail)
+        raise ValueError('Autres enregistrements A pointant exactement vers '+ip+' : '+', '.join(sorted(r['name'] for r in conflicts))+'. Les examiner avant restitution au stock ; aucun DNS étranger supprimé.')
+
+
 def main():
     path=Path(sys.argv[1]);cfg=json.loads(path.read_text());log=Journal(cfg)
     ip=cfg['public_ip'];client=cfg.get('retire_client');mode=cfg.get('lifecycle_mode','delete_release')
@@ -19,6 +30,9 @@ def main():
     if release:
         cf=Cloudflare(cfg['cloudflare'],log);cfg['ovh']['primary_ip']=cfg['vps']['primary_ip']
         ovh=Ovh(cfg['ovh'],log);ovh.inspect(ip)
+        if client:
+            legacy_name='-'.join(reversed(ip.split('.')))+'.'+cfg['domain']
+            check_aliases(cf,ip,fqdn,client,log,preflight=True,legacy_name=legacy_name)
     pve=vps=None
     try:
         if not client:
@@ -62,8 +76,7 @@ def main():
             if legacy!=fqdn:
                 for record in cf.inspect(legacy,ip):
                     if record.get('comment')=='Virtualwan managed':cf.call('DELETE','/'+record['id'])
-            aliases=cf.call('GET',params={'type':'A','content':ip,'per_page':100})
-            if any(r['name']!=fqdn for r in aliases):raise ValueError('D’autres enregistrements A utilisent cette IP ; les examiner avant restitution au stock.')
+            check_aliases(cf,ip,fqdn,client,log)
         result={'fqdn':fqdn,'public_ip':ip,'retired':bool(client) and mode!='release','mode':mode,'dns_verified':release,'journal':str(log.directory)}
         path.with_suffix('.result.json').write_text(json.dumps(result));log.event('lifecycle.complete',**result)
     finally:

@@ -208,3 +208,37 @@ backup-page verification, rejected credentials and an expired session before a
 native delete. The earlier CSRF fixture coverage omitted the actual login path;
 this regression is now covered. Validation remains local without production
 firewall access.
+
+
+## Exact DNS alias checks during IP release
+
+The alias check uses content.exact with local A/content verification; hostname
+inspection uses name.exact with local hostname verification. DNS listings are
+paginated, with repeated pages and oversized/incomplete scans rejected. Records
+for other IPs cannot create a false alias conflict even if a filter is ignored.
+Real conflicts report their names and IDs in the journal and are checked before
+VM shutdown/deletion. Foreign records are not deleted automatically.
+
+Fixtures cover unrelated records, real aliases, owned old names, later pages,
+repeated pages and prevention of remote mutations on a foreign alias conflict.
+No actual Cloudflare records were read, edited or removed during these tests.
+Source: [Cloudflare DNS listing filters](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/list/).
+
+
+## Reactivation after the last stocked IP is allocated
+
+A real nftables syntax check in an isolated Debian 13 container reproduced the
+service failure: an empty `elements = { }` clause is invalid. Empty named sets
+now omit the elements clause. `nft -c` passes for one active/no inactive IP, active
+and inactive IPs, and no public IPs. No production firewall was modified.
+
+Provisioning now supplies the corrected router source and checksum to vps_apply.
+The installed owned tool and configuration are backed up before upgrade and
+restored if validation/reload fails. This makes retry update the remote tool as
+well as the Docker app. Reload failures include the service journal, with explicit
+private-key lines redacted. Linux fixtures exercise upgrade, rollback and bad
+checksum refusal; actual reactivation still requires the user's retry.
+
+Final reactivation validation: all 152 Linux tests pass, and all three real
+nftables syntax checks pass. The Docker image was rebuilt locally. Production
+reactivation has not been performed by the agent.

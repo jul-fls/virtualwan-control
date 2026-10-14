@@ -98,13 +98,15 @@ def preflight(c, state):
         raise ValueError('nft table virtualwan already exists without managed state')
 
 def firewall(c):
-    ips = ', '.join(c['additional_ips']+c.get('inactive_ips',[]))
-    inactive=', '.join(c.get('inactive_ips',[]))
+    def elements(ips):
+        return ' elements = { '+', '.join(ips)+' };' if ips else ''
+    public_elements=elements(c['additional_ips']+c.get('inactive_ips',[]))
+    inactive_elements=elements(c.get('inactive_ips',[]))
     wan = c['wan_interface']
     wg = c['wireguard_interface']
     return f'''table inet virtualwan {{
- set public_ips {{ type ipv4_addr; elements = {{ {ips} }}; }}
- set inactive_ips {{ type ipv4_addr; elements = {{ {inactive} }}; }}
+ set public_ips {{ type ipv4_addr;{public_elements} }}
+ set inactive_ips {{ type ipv4_addr;{inactive_elements} }}
  chain input {{
   type filter hook input priority -10; policy accept;
   iifname "{wg}" ip saddr {c['peer_address']} ip daddr {ipaddress.ip_interface(c['tunnel_address']).ip} ip protocol icmp accept

@@ -139,7 +139,7 @@ class AdapterLifecycleTests(unittest.TestCase):
                     'retire_client':{'vmid':120,'mac':'02:00:00:00:00:01','public_ip':'8.8.8.8','next_hop':'10.254.251.11'},
                     'pve':{},'vps':{'primary_ip':'9.9.9.9','config_path':'/etc/virtualwan.json'},'pfsense':{},'cloudflare':{},'ovh':{}}
             path=Path(directory)/'lifecycle.json';path.write_text(json.dumps(config))
-            pve=Mock();pve.call.return_value={'exists':True};vps=Mock();cf=Mock();cf.inspect.return_value=[];cf.call.return_value=[]
+            pve=Mock();pve.call.return_value={'exists':True};vps=Mock();cf=Mock();cf.inspect.return_value=[];cf.call.return_value=[];cf.records_for_ip.return_value=[]
             with patch.object(sys,'argv',['lifecycle',str(path)]),patch.object(lifecycle,'Journal'),patch.object(lifecycle,'Remote',side_effect=[pve,vps]),patch.object(lifecycle,'PfSense') as pf,patch.object(lifecycle,'Cloudflare',return_value=cf) as cloud,patch.object(lifecycle,'Ovh') as ovh,patch.object(lifecycle,'wait_dns'):
                 lifecycle.main()
             return pve,vps,pf,cloud,ovh
@@ -347,6 +347,16 @@ class IdleRouterTests(unittest.TestCase):
     def test_stock_drop_precedes_forward_accept(self):
         c=self.config();c['inactive_ips']=['1.1.1.1'];rules=self.router.firewall(self.load(c))
         self.assertLess(rules.index('ip daddr @inactive_ips counter drop'),rules.index('ip daddr @public_ips counter accept'))
+
+    def test_empty_stock_set_omits_empty_elements_clause(self):
+        rules=self.router.firewall(self.config())
+        self.assertIn('set inactive_ips { type ipv4_addr; }',rules)
+        self.assertNotIn('elements = {  }',rules)
+    def test_no_public_ips_keeps_empty_named_sets(self):
+        c=self.config();c['additional_ips']=[]
+        rules=self.router.firewall(c)
+        self.assertIn('set public_ips { type ipv4_addr; }',rules)
+        self.assertNotIn('elements = {  }',rules)
 
 
 del Fixture

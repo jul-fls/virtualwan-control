@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Virtualwan provisioning: plan, read-only inspect, then explicit apply."""
 import argparse
+import base64
 from datetime import datetime, timezone
 import hashlib
 import ipaddress
@@ -197,9 +198,26 @@ class Cloudflare:
             raise RuntimeError('Cloudflare API refused request')
         return data['result']
 
+    def records(self,filters):
+        records=[];seen=set()
+        for page in range(1,101):
+            batch=self.call('GET',params={**filters,'per_page':100,'page':page})
+            if not isinstance(batch,list):raise ValueError('Réponse DNS Cloudflare invalide')
+            records.extend(batch)
+            if len(batch)<100:return records
+            signature=tuple(sorted(r['id'] for r in batch))
+            if signature in seen:raise ValueError('Pagination DNS Cloudflare répétée ; inventaire incomplet')
+            seen.add(signature)
+        raise ValueError('Inventaire DNS Cloudflare trop volumineux ; contrôle incomplet')
+
+    def records_for_ip(self,ip):
+        # Exact server-side filter plus local verification: never mistake another
+        # IP's records for stale aliases if a provider ignores a filter.
+        return [r for r in self.records({'type':'A','content.exact':ip}) if r.get('type')=='A' and r.get('content')==ip]
+
     def inspect(self, fqdn, ip):
         # Include CNAME and AAAA conflicts; no half-working IPv6 is published.
-        records = self.call('GET', params={'name': fqdn, 'per_page': 100})
+        records = [r for r in self.records({'name.exact':fqdn}) if r.get('name','').lower().rstrip('.')==fqdn.lower().rstrip('.')]
         for r in records:
             if r['type'] != 'A' or r['content'] != ip:
                 raise ValueError('Existing DNS name conflicts with requested public IPv4')
@@ -376,7 +394,9 @@ def orchestrate(cfg, mode, log, save_config=None):
         cf.ensure(fqdn, ip)
         wait_dns(fqdn, ip, log)
         ovh.ensure(ip, fqdn)
-        vps.call('vps_apply', path=cfg['vps']['config_path'], primary_ip=cfg['vps']['primary_ip'], ip=ip)
+        router_source=(Path(__file__).parents[2]/'tools/virtualwan-router.py').read_bytes()
+        vps.call('vps_apply', path=cfg['vps']['config_path'], primary_ip=cfg['vps']['primary_ip'], ip=ip,
+                 source_base64=base64.b64encode(router_source).decode(),source_sha256=hashlib.sha256(router_source).hexdigest())
         pf.configure(pf.snapshot('pfsense.pre-change'), ip, fqdn, vm['mac'])
         if not cfg.get('start_vm'):
             log.event('provisioned.stopped', vmid=p['vmid'], fqdn=fqdn)
