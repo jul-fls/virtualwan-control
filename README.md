@@ -435,3 +435,19 @@ Une commande distante réellement en cours ne peut pas être annulée ou rejoué
 en parallèle. Après un redémarrage de l’application, les jobs en cours deviennent
 interrompus ; vérifier aussi que leurs commandes distantes sont terminées avant
 reprise. Les achats OVH ne sont jamais rejoués par ces actions.
+
+
+### Catalogue OVH : prix récurrents et achat d’IPv4
+
+Les frais d’installation `P0D` sont séparés des prix de renouvellement. Le choix
+de durée utilise les lignes récurrentes (mensuelles, annuelles, etc.) ; une licence
+réellement gratuite peut rester à zéro. Le sélecteur VPS exclut les addons, qui
+restent disponibles dans les options de la gamme. Le devis fournisseur détaillé
+et sa confirmation humaine restent obligatoires avant achat.
+
+L’achat d’IP utilise le catalogue dédié `/order/cart/{cartId}/ip`, car les options
+VPS ne proposent pas nécessairement d’IP. Seules les IPv4 individuelles sont
+retenues, les blocs et IPv6 sont exclus. Le pays utilise les `allowedValues` du
+fournisseur ; la destination est imposée côté serveur au `expected_service` du
+profil choisi et affichée en lecture seule. Il faut autoriser GET/POST
+`/order/cart/*` et les configurations d’items dans la clé OVH.

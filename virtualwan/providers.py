@@ -38,13 +38,13 @@ class OvhAPI:
         return result
 
     def catalogue(self,profile,kind):
-        if kind=='additional_ip':
-            from .catalogue import enrich,is_ip_offer
-            offers=self.call('GET','/order/cartServiceOption/vps/'+quote(profile['config']['ovh']['expected_service'],safe=''))
-            return [o for o in enrich(offers,self.public_catalogue(profile)) if is_ip_offer(o)]
+        from .catalogue import enrich,is_ip_offer
         cart=self.call('POST','/order/cart',{'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR'),'description':'Virtualwan catalogue only'})
-        from .catalogue import enrich
-        return enrich(self.call('GET','/order/cart/'+cart['cartId']+'/vps'),self.public_catalogue(profile))
+        if kind=='additional_ip':
+            if not profile['config']['ovh'].get('expected_service'):raise ValueError('Service VPS cible requis pour acheter une IP.')
+            return [o for o in enrich(self.call('GET','/order/cart/'+cart['cartId']+'/ip'),{}) if is_ip_offer(o)]
+        public=self.public_catalogue(profile);plans={p['planCode'] for p in public.get('plans',[])}
+        return enrich([o for o in self.call('GET','/order/cart/'+cart['cartId']+'/vps') if o['planCode'] in plans],public)
 
     def public_catalogue(self,profile):
         response=requests.get(self.base+'/order/catalog/public/vps',params={'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR')},timeout=30)
@@ -67,12 +67,13 @@ class OvhAPI:
         cid=cart['cartId'];self.call('POST',f'/order/cart/{cid}/assign')
         item={key:payload[key] for key in ('planCode','duration','pricingMode','quantity')}
         if payload['kind']=='additional_ip':
-            path='/order/cartServiceOption/vps/'+quote(profile['config']['ovh']['expected_service'],safe='')
-            result=self.call('POST',path,{**item,'cartId':cid})
+            path=f'/order/cart/{cid}/ip'
+            result=self.call('POST',path,item)
         else:result=self.call('POST',f'/order/cart/{cid}/vps',item)
         iid=result['itemId']
         required=self.call('GET',f'/order/cart/{cid}/item/{iid}/requiredConfiguration')
-        supplied=payload.get('configurations',{})
+        supplied=dict(payload.get('configurations',{}))
+        if payload['kind']=='additional_ip':supplied['destination']=profile['config']['ovh']['expected_service']
         missing=[r['label'] for r in required if r.get('required',True) and r['label'] not in supplied]
         if missing:raise ValueError('Configurations OVH requises : '+', '.join(missing))
         for label,value in supplied.items():

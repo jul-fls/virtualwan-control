@@ -242,3 +242,25 @@ checksum refusal; actual reactivation still requires the user's retry.
 Final reactivation validation: all 152 Linux tests pass, and all three real
 nftables syntax checks pass. The Docker image was rebuilt locally. Production
 reactivation has not been performed by the agent.
+
+
+## OVH catalogue pricing and dedicated IPv4 ordering
+
+Read the actual authenticated catalogues without checkout: VPS service options
+contained disks/licenses but no IP, while the dedicated IP cart offered individual
+RIPE/ARIN failover IPv4s and IP blocks. New VPS listings also included addons.
+A new VPS item accepted P1M in an unpaid cart. A corrected individual RIPE IPv4
+cart accepted FR and the configured destination service, and produced a GET
+checkout quote of EUR 1.99 excluding tax / EUR 2.39 including tax. No POST checkout,
+payment, purchased IP or purchased VPS was issued.
+
+The corrected UI selects recurring prices instead of P0D setup fees; the backend
+validates those selections. Fixtures cover main-plan filtering, exact purchase
+endpoints, country allowedValues, single IPv4 filtering, immutable destination,
+automatic destination configuration and non-paid quote generation.
+Source: [OVH Additional IP API ordering](https://support.us.ovhcloud.com/hc/en-us/articles/360011668000-Purchasing-and-managing-Additional-IPs).
+
+Final catalogue validation: all 165 Linux tests pass. The eight-page localhost
+browser test also passes, including nonzero monthly pricing labels and both
+guided quote forms. Docker build and git diff checks pass. No purchase approval
+was sent, and production resources were not provisioned.
