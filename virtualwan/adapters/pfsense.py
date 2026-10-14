@@ -294,3 +294,53 @@ class PfSense:
             raise ValueError('Managed incoming rule is inconsistent')
         self.log.event('pfsense.config.verified', ip=ip, mac=mac, next_hop=c['next_hop'], gateway=gwname)
         return root
+
+    def native_post(self,page,values):
+        soup=BeautifulSoup(self.request('GET',page).text,'html.parser')
+        token=soup.find('input',attrs={'name':'__csrf_magic'})
+        if not token:raise ValueError('pfSense CSRF absent sur '+page)
+        response=self.request('POST',page,data={**values,'__csrf_magic':token['value']})
+        if BeautifulSoup(response.text,'html.parser').select('.alert-danger'):raise ValueError('Suppression pfSense refusée sur '+page)
+
+    def retire(self,ip,client):
+        ip=str(ipaddress.IPv4Address(ip));c=self.cfg;gw='VWAN_'+ip.replace('.','')
+        targets=[
+            ('filter/rule','firewall_rules.php?if='+c['wireguard_interface'],lambda r:r.findtext('descr')=='Virtualwan incoming '+ip,
+             lambda r:r.findtext('destination/address')==ip and r.findtext('interface')==c['wireguard_interface']),
+            ('nat/outbound/rule','firewall_nat_out.php',lambda r:r.findtext('descr')=='Virtualwan no NAT '+ip,
+             lambda r:r.findtext('source/network')==ip+'/32' and r.find('nonat') is not None),
+            ('staticroutes/route','system_routes.php',lambda r:r.findtext('network')==ip+'/32',lambda r:r.findtext('gateway')==gw),
+            ('gateways/gateway_item','system_gateways.php',lambda r:r.findtext('name')==gw,
+             lambda r:r.findtext('gateway')==client['next_hop'] and r.findtext('interface')==c['public_interface']),
+            ('dhcpd/'+c['public_interface']+'/staticmap','services_dhcp.php?if='+c['public_interface'],lambda r:r.findtext('ipaddr')==client['next_hop'],
+             lambda r:r.findtext('mac','').lower()==client['mac'].lower() and r.findtext('descr')=='Virtualwan '+ip),
+        ]
+        root=self.snapshot('retire.before')
+        # Verify all ownership predicates before removing the first object.
+        for xpath,page,find,owns in targets:
+            matched=[r for r in root.findall(xpath) if find(r)]
+            if len(matched)>1 or any(not owns(r) for r in matched):raise ValueError('Conflit de propriété pfSense : '+xpath)
+        for xpath,page,find,owns in targets:
+            root=self.snapshot('retire.pre-step')
+            matched=[(i,r) for i,r in enumerate(root.findall(xpath)) if find(r)]
+            if not matched:continue
+            i,node=matched[0]
+            if not owns(node):raise ValueError('Configuration pfSense modifiée pendant la suppression')
+            identifier=str(i)
+            if xpath=='gateways/gateway_item':
+                from urllib.parse import urlsplit,parse_qs
+                soup=BeautifulSoup(self.request('GET',page).text,'html.parser');ids=[]
+                for row in soup.select('tr'):
+                    if not any(cell.get_text(strip=True)==gw for cell in row.select('td')):continue
+                    for anchor in row.select('a[href]'):
+                        query=parse_qs(urlsplit(anchor['href']).query)
+                        if query.get('act')==['del'] and query.get('id'):ids.append(query['id'][0])
+                if len(set(ids))!=1:raise ValueError('Impossible d’identifier la gateway dans le formulaire pfSense')
+                identifier=ids[0]
+            self.native_post(page,{'act':'del','id':identifier,'if':c['public_interface'] if xpath.startswith('dhcpd/') else c['wireguard_interface']})
+            self.apply(page)
+            if any(find(r) for r in self.snapshot('retire.post-step').findall(xpath)):raise ValueError('Objet pfSense encore présent après suppression : '+xpath)
+            self.log.event('pfsense.client.resource.removed',ip=ip,resource=xpath)
+        # Kill only states involving this one IP, never the home's global states.
+        self.native_post('diag_dump_states.php',{'filter':ip,'killfilter':'yes'})
+        self.log.event('pfsense.client.retired',ip=ip,alias_retained_for_owned_stock=True)

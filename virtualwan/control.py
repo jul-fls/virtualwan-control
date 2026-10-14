@@ -74,7 +74,8 @@ class Control:
             count=db.execute('SELECT count(*) FROM ip_pool WHERE profile_id=?',(profile_id,)).fetchone()[0]
             if count>=p['capacity']:raise domain.Conflict('Routeur plein. Dupliquer le profil et préparer un nouveau routeur.')
             if db.execute('SELECT 1 FROM ip_pool WHERE ip=?',(ip,)).fetchone():raise domain.Conflict('IP déjà présente dans l’inventaire.')
-            db.execute('INSERT INTO ip_pool VALUES(?,?,?,?,?)',(ip,profile_id,'available',None,time.time()))
+            db.execute('INSERT INTO ip_pool VALUES(?,?,?,?,?)',(ip,profile_id,'available' if self.demo else 'dns_pending',None,time.time()))
+            if not self.demo and self.allow_provision:self.queue_stock(profile_id,ip,db)
 
     def deployments(self):
         return [{**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}} for row in self.store.rows('SELECT * FROM deployments ORDER BY rowid DESC')]
@@ -140,6 +141,8 @@ class Control:
         required=('planCode','duration','pricingMode')
         if any(not body.get(k) or len(str(body[k]))>200 for k in required):raise ValueError('Offre/durée/tarification du catalogue OVH requises.')
         purchase=ident();payload={k:body[k] for k in required}
+        if body.get('draft_id'):
+            payload.update(draft_id=body['draft_id'],item_configurations=body.get('item_configurations',{}))
         followup=body.get('followup')
         if followup:
             followup={k:v for k,v in followup.items() if k in ('model_id','customer','username','public_key','ssh_auth')}
@@ -223,7 +226,8 @@ class Control:
                 existing=db.execute('SELECT * FROM ip_pool WHERE ip=?',(ip,)).fetchone()
                 if existing and existing['profile_id']!=profile_id:raise domain.Conflict('Une IP a changé de routeur ; réconcilier explicitement les routes et VM.')
                 if not existing:
-                    db.execute('INSERT INTO ip_pool VALUES(?,?,?,?,?)',(ip,profile_id,'available',None,time.time()));added+=1
+                    db.execute('INSERT INTO ip_pool VALUES(?,?,?,?,?)',(ip,profile_id,'dns_pending',None,time.time()));added+=1
+                    if self.allow_provision:self.queue_stock(profile_id,ip,db)
                 else:db.execute('UPDATE ip_pool SET seen_at=? WHERE ip=?',(time.time(),ip))
             for row in db.execute('SELECT * FROM ip_pool WHERE profile_id=?',(profile_id,)).fetchall():
                 if row['ip'] not in owned:db.execute("UPDATE ip_pool SET state='quarantined' WHERE ip=?",(row['ip'],))
@@ -259,6 +263,9 @@ class Control:
                 ip=client['public_ip'];existing=db.execute('SELECT * FROM ip_pool WHERE ip=?',(ip,)).fetchone()
                 if existing and existing['profile_id']!=profile_id:raise domain.Conflict('IP enregistrée sur un autre profil.')
                 record=db.execute('SELECT * FROM deployments WHERE ip=?',(ip,)).fetchone()
+                if existing and existing['job_id']:
+                    pending=db.execute("SELECT state FROM jobs WHERE id=?",(existing['job_id'],)).fetchone()
+                    if pending and pending['state'] in ('queued','running','interrupted','failed'):continue
                 info=json.loads(record['data']) if record else {'fqdn':ip,'job_id':run,'customer':'Discovered existing VM'}
                 info.update(vmid=client['vmid'],mac=client['mac'],next_hop=client['next_hop'],node=client['node'],vm_name=client['name'],status='active' if client['status']=='running' else 'stopped',last_verified=time.time(),source='Proxmox live inventory')
                 if record:db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(info),record['id']))
@@ -305,12 +312,110 @@ class Control:
             if len(set(matched))!=purchase['quantity']:
                 return {'delivery':delivery,'needs_review':True,'reason':'IP livrées non liées sans ambiguïté aux lignes de commande ; inventaire mis à jour, aucune VM créée automatiquement.'}
             purchase['delivered_ips']=sorted(set(matched));state='delivered'
-            if purchase.get('followup') and not purchase.get('deployment_job'):
+            ready=all(self.store.one('SELECT state FROM ip_pool WHERE ip=?',(ip,))['state']=='available' for ip in purchase['delivered_ips'])
+            if not ready:state='awaiting_delivery'
+            if ready and purchase.get('followup') and not purchase.get('deployment_job'):
                 body={**purchase['followup'],'profile_id':p['id'],'ip':purchase['delivered_ips'][0]}
                 purchase['deployment_job']=self.request_deploy(body,purchase['model_snapshot'])
         with self.store.tx() as db:db.execute('UPDATE purchases SET state=?,data=? WHERE id=?',(state,json.dumps(purchase),key))
         self.store.event(key,'purchase.delivery.reconciled',state=state,delivery=delivery)
         return {'state':state,'purchase':purchase}
+
+    def queue_stock(self,profile_id,ip,db):
+        pending=db.execute("SELECT payload FROM jobs WHERE kind='stock_dns' AND state IN ('queued','running')").fetchall()
+        if any(json.loads(row['payload']).get('ip')==ip for row in pending):raise domain.Conflict('Préparation DNS déjà en cours.')
+        job=self.store.job('stock_dns',{'profile_id':profile_id,'ip':ip,'simulated':self.demo},db)
+        db.execute("UPDATE ip_pool SET state='dns_pending',job_id=? WHERE ip=?",(job,ip))
+        return job
+
+    def request_stock(self,ip):
+        if not self.demo and not self.allow_provision:raise domain.Conflict('Provisionnement désactivé.')
+        with self.store.tx() as db:
+            row=db.execute('SELECT * FROM ip_pool WHERE ip=?',(ip,)).fetchone()
+            if not row:raise KeyError(ip)
+            if row['job_id'] or db.execute('SELECT 1 FROM deployments WHERE ip=?',(ip,)).fetchone():raise domain.Conflict('Cette IP est affectée ou réservée à une VM.')
+            return self.queue_stock(row['profile_id'],ip,db)
+
+    def request_retire(self,key,body):
+        if not self.demo and not self.allow_provision:raise domain.Conflict('Provisionnement désactivé.')
+        mode=body.get('mode','delete_release')
+        if mode not in ('release','delete','delete_release'):raise ValueError('Action client inconnue.')
+        expected='LIBERER' if mode=='release' else 'SUPPRIMER'
+        if body.get('confirmation')!=expected:raise ValueError('Saisir '+expected+' pour confirmer cette action.')
+        with self.store.tx() as db:
+            row=db.execute('SELECT * FROM deployments WHERE id=?',(key,)).fetchone()
+            if not row:raise KeyError(key)
+            client={**json.loads(row['data']),**{k:row[k] for k in ('id','ip','profile_id','model_id')}}
+            if not client.get('vmid') or not client.get('mac') or not client.get('next_hop'):raise domain.Conflict('Identité VM incomplète : lire les VM avant suppression.')
+            if client['status'] not in ('active','stopped','imported','simulated','detached'):raise domain.Conflict('VM en cours de modification ; vérifier le journal.')
+            for active in db.execute("SELECT payload FROM jobs WHERE kind='retire' AND state IN ('queued','running','interrupted')"):
+                if json.loads(active['payload'])['client']['id']==key:raise domain.Conflict('Suppression déjà en cours ou interrompue ; consulter son journal.')
+            if not client['ip'] and mode!='delete':raise domain.Conflict('Cette VM n’a plus d’IP ; seule sa suppression est disponible.')
+            job=self.store.job('retire',{'profile_id':row['profile_id'],'client':client,'mode':mode,'simulated':self.demo},db)
+            info=json.loads(row['data']);info.update(status='releasing' if mode=='release' else 'retiring',retirement_job=job)
+            db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(info),key))
+            db.execute("UPDATE ip_pool SET state='reserved',job_id=? WHERE ip=?",(job,row['ip']))
+        self.store.event(job,'client.retirement.requested',vmid=client['vmid'],ip=client['ip'],mac=client['mac'],fqdn=client['fqdn'])
+        return job
+
+    def run_lifecycle(self,key,payload):
+        from .hostnames import stock_hostname
+        if bool(payload['simulated'])!=self.demo:raise domain.Conflict('Mode du job différent de celui du serveur.')
+        client=payload.get('client');ip=client['ip'] if client else payload['ip']
+        mode=payload.get('mode','delete_release');release=not client or mode!='delete'
+        if client:
+            owner=self.store.one('SELECT data FROM deployments WHERE id=?',(client['id'],))
+            if json.loads(owner['data']).get('retirement_job')!=key:raise domain.Conflict('Ce job ne possède plus la VM.')
+        if ip:
+            lease=self.store.one('SELECT * FROM ip_pool WHERE ip=?',(ip,))
+            if lease['job_id']!=key or lease['state'] not in ('reserved','dns_pending'):raise domain.Conflict('L’IP ne possède plus la réservation de ce job ; aucune modification possible.')
+        p=self.store.document('profiles',payload['profile_id']);cfg=deepcopy(p['config'])
+        ip=client['ip'] if client else payload['ip'];cfg['public_ip']=ip
+        cfg['stock_routing_ready']=p['ready']
+        if client:cfg['retire_client']={**client,'public_ip':ip or client['last_attachment']['ip']}
+        cfg['lifecycle_mode']=mode
+        if self.demo:result={'simulated':True,'fqdn':stock_hostname(ip,cfg['domain'],cfg.get('hostname_pattern','vps-{ipv4_compact}.{domain}')) if ip and release else client.get('fqdn'),'public_ip':ip,'retired':bool(client) and mode!='release','dns_verified':release,'mode':mode}
+        else:
+            if not self.allow_provision:raise domain.Conflict('Provisionnement désactivé.')
+            run=self.store.root/'runs'/key;run.mkdir(parents=True,exist_ok=True)
+            cfg['log_directory']=str(run/'lifecycle');cfg['backup_key_env']='VWAN_BACKUP_KEY'
+            env=os.environ.copy()
+            for section in cfg.values():
+                if isinstance(section,dict):
+                    for name,value in section.items():
+                        if name.endswith('_env') and value:
+                            secret=self.store.secret_get(value)
+                            if secret:env[value]=secret
+            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip()
+            for target in ('pve','vps'):
+                cfg[target]['known_hosts']=str(self.store.root/'ssh-known-hosts')
+                if cfg[target].get('private_key'):
+                    private=(self.store.root/cfg[target]['private_key']).resolve()
+                    if not private.is_relative_to(self.store.root):raise ValueError('Clé SSH hors data.')
+                    cfg[target]['private_key']=str(private)
+            path=run/'lifecycle.json';path.write_text(json.dumps(cfg));os.chmod(path,0o600)
+            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.lifecycle',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            for line in proc.stdout:self.store.event(key,'lifecycle.progress',message=line.strip())
+            if proc.wait():raise RuntimeError('Nettoyage/DNS incomplet : IP en quarantaine. Inspecter le journal avant reprise du même job.')
+            result=json.loads(path.with_suffix('.result.json').read_text())
+        with self.store.tx() as db:
+            if client and mode=='release':
+                info={k:v for k,v in client.items() if k not in ('id','ip','profile_id','model_id')}
+                info.update(status='detached',last_attachment={'ip':ip,'fqdn':client.get('fqdn')},network_detached=True)
+                db.execute('UPDATE deployments SET ip=NULL,data=? WHERE id=?',(json.dumps(info),client['id']))
+            elif client:db.execute('DELETE FROM deployments WHERE id=?',(client['id'],))
+            db.execute("UPDATE ip_pool SET state=?,job_id=NULL WHERE ip=? AND job_id=?",('available' if release else 'reserved',ip,key))
+            # A purchased IP with a VM follow-up is reserved atomically before it
+            # becomes visible as free stock to another administrator request.
+            if not client:
+                for row in db.execute("SELECT id,data FROM purchases WHERE profile_id=? AND state='awaiting_delivery'",(p['id'],)).fetchall():
+                    purchase=json.loads(row['data'])
+                    if purchase.get('followup') and not purchase.get('deployment_job') and ip in purchase.get('delivered_ips',[]):
+                        purchase['deployment_job']=self.request_deploy({**purchase['followup'],'profile_id':p['id'],'ip':ip},purchase['model_snapshot'])
+                        db.execute("UPDATE purchases SET state='delivered',data=? WHERE id=?",(json.dumps(purchase),row['id']))
+
+        self.store.event(key,'stock.ip.ready',**result)
+        return result
 
     def request_router_setup(self,key,body):
         p=self.store.document('profiles',key)
@@ -361,6 +466,7 @@ class Control:
                                  'additional_ips':[r['ip'] for r in self.store.rows('SELECT ip FROM ip_pool WHERE profile_id=?',(p['id'],))]}
             # Keep only fields accepted by the router installer.
             cfg['router_setup']={k:cfg['router_setup'][k] for k in ('primary_ip','wan_interface','wireguard_interface','listen_port','mtu','tunnel_address','peer_address','peer_public_key','additional_ips')}
+            cfg['router_setup']['inactive_ips']=cfg['router_setup']['additional_ips'];cfg['router_setup']['additional_ips']=[]
             env=os.environ.copy()
             for section in cfg.values():
                 if isinstance(section,dict):
@@ -437,6 +543,7 @@ class Control:
         key=row['id'];payload=json.loads(row['payload']);self.store.event(key,'job.started',kind=row['kind'])
         try:
             if row['kind']=='deploy':result=self.run_deploy(key,payload)
+            elif row['kind'] in ('stock_dns','retire'):result=self.run_lifecycle(key,payload)
             elif row['kind']=='router_setup':result=self.run_router_setup(key,payload)
             elif row['kind']=='sync':result=self.sync(payload['profile_id'],key)
             elif row['kind']=='inspect':result=self.inspect_clients(payload['profile_id'],key)
@@ -458,7 +565,7 @@ class Control:
             self.store.event(key,'job.failed',error_type=type(error).__name__,error=str(error))
             self.job_state(key,'failed',{'error':str(error),'recovery':'Consulter les événements. Aucun retrait ou nouvel achat automatique.'})
             with self.store.tx() as db:
-                if row['kind']=='deploy':
+                if row['kind'] in ('deploy','stock_dns','retire'):
                     db.execute("UPDATE ip_pool SET state='quarantined' WHERE job_id=?",(key,))
                     for r in db.execute('SELECT id,data FROM deployments').fetchall():
                         data=json.loads(r['data'])

@@ -28,7 +28,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,data TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY,data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS ip_pool(ip TEXT PRIMARY KEY,profile_id TEXT NOT NULL,state TEXT NOT NULL,job_id TEXT,seen_at REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY,ip TEXT NOT NULL UNIQUE,profile_id TEXT NOT NULL,model_id TEXT,data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY,ip TEXT UNIQUE,profile_id TEXT NOT NULL,model_id TEXT,data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL DEFAULT '{}',created_at REAL NOT NULL,updated_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS purchases(id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,state TEXT NOT NULL,data TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,created_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS secrets(name TEXT PRIMARY KEY,ciphertext BLOB NOT NULL);
@@ -36,6 +36,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,time REAL NOT NULL,action TEXT NOT NULL,data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY,value TEXT NOT NULL);
             ''')
+            # executescript ends the initial transaction; migrate atomically.
+            if not db.in_transaction:db.execute('BEGIN IMMEDIATE')
+            # SQLite cannot drop NOT NULL in place. Preserve all existing records.
+            if any(c['name']=='ip' and c['notnull'] for c in db.execute('PRAGMA table_info(deployments)')):
+                db.execute('ALTER TABLE deployments RENAME TO deployments_old')
+                db.execute('CREATE TABLE deployments(id TEXT PRIMARY KEY,ip TEXT UNIQUE,profile_id TEXT NOT NULL,model_id TEXT,data TEXT NOT NULL)')
+                db.execute('INSERT INTO deployments SELECT * FROM deployments_old')
+                db.execute('DROP TABLE deployments_old')
             db.execute("UPDATE jobs SET state='interrupted',updated_at=? WHERE state='running'",(time.time(),))
             # Never replay a possibly accepted supplier checkout after a crash.
             db.execute("UPDATE purchases SET state='uncertain' WHERE state='checking_out'")

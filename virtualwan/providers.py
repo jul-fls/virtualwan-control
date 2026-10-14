@@ -39,11 +39,30 @@ class OvhAPI:
 
     def catalogue(self,profile,kind):
         if kind=='additional_ip':
-            return self.call('GET','/order/cartServiceOption/vps/'+quote(profile['config']['ovh']['expected_service'],safe=''))
+            from .catalogue import enrich,is_ip_offer
+            offers=self.call('GET','/order/cartServiceOption/vps/'+quote(profile['config']['ovh']['expected_service'],safe=''))
+            return [o for o in enrich(offers,self.public_catalogue(profile)) if is_ip_offer(o)]
         cart=self.call('POST','/order/cart',{'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR'),'description':'Virtualwan catalogue only'})
-        return self.call('GET','/order/cart/'+cart['cartId']+'/vps')
+        from .catalogue import enrich
+        return enrich(self.call('GET','/order/cart/'+cart['cartId']+'/vps'),self.public_catalogue(profile))
+
+    def public_catalogue(self,profile):
+        response=requests.get(self.base+'/order/catalog/public/vps',params={'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR')},timeout=30)
+        response.raise_for_status();return response.json()
+
+    def option_catalogue(self,profile,plan):
+        from .catalogue import enrich
+        cart=self.call('POST','/order/cart',{'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR'),'description':'Virtualwan options non payantes'})
+        return enrich(self.call('GET',f"/order/cart/{cart['cartId']}/vps/options?planCode="+quote(plan,safe='')),self.public_catalogue(profile))
+
+    def describe(self,profile,payload):
+        from .catalogue import describe
+        return describe(self,profile,payload)
 
     def prepare(self,profile,payload):
+        if payload.get('draft_id'):
+            from .catalogue import configure_draft
+            return configure_draft(self,profile,payload)
         cart=self.call('POST','/order/cart',{'ovhSubsidiary':profile['config']['ovh'].get('subsidiary','FR'),'description':'Virtualwan quote '+payload['purchase_id']})
         cid=cart['cartId'];self.call('POST',f'/order/cart/{cid}/assign')
         item={key:payload[key] for key in ('planCode','duration','pricingMode','quantity')}
@@ -80,11 +99,34 @@ class DemoOvh:
     """Explicit offline demo. Its output is always marked simulated and cannot enter live jobs."""
     def __init__(self,config,store,run):self.store=store;self.run=run
     def catalogue(self,profile,kind):
-        return [{'planCode':'DEMO-ip' if kind=='additional_ip' else 'DEMO-router','productName':'Simulation — aucun achat','pricings':[{'duration':'P1M','pricingMode':'default','price':{'currencyCode':'EUR','value':2.00}}]}]
+        return [{'planCode':'DEMO-ip' if kind=='additional_ip' else 'DEMO-router','productName':'Simulation — aucun achat','name':'Additional IPv4 — démo' if kind=='additional_ip' else 'VPS SSD — démo',
+                 'technical':{} if kind=='additional_ip' else {'cpu':{'cores':4},'memory':{'size':8},'storage':{'disks':[{'capacity':75,'technology':'SSD','interface':'NVMe'}]}},
+                 'pricings':[{'duration':'P1M','pricingMode':'default','price':{'currencyCode':'EUR','value':2.00}}]}]
+    def option_catalogue(self,profile,plan):
+        return [{'planCode':'DEMO-disk','family':'additionalDisk','exclusive':True,'mandatory':False,'name':'Disque supplémentaire 50 Go — démo','pricings':[{'duration':'P1M','pricingMode':'default','price':{'currencyCode':'EUR','value':1}}]}]
+    def describe(self,profile,payload):
+        from .store import ident
+        fields=[{'item_id':1,'label':'country' if payload['kind']=='additional_ip' else 'vps_datacenter','required':True,'values':['FR','DE','UK'] if payload['kind']=='additional_ip' else ['GRA','SBG','DE']}]
+        if payload['kind']=='router':fields.append({'item_id':1,'label':'vps_os','required':False,'values':['Debian 13','Ubuntu 24.04']})
+        key=ident();draft={'profile_id':profile['id'],'fields':fields,'selection':{k:payload[k] for k in ('planCode','duration','pricingMode','quantity')},'kind':payload['kind'],'profile_revision':profile['revision'],'cart_id':'DEMO-'+key,'options':payload.get('options',[]),'expires_at':time.time()+900,'used':False}
+        with self.store.tx() as db:db.execute('INSERT INTO settings VALUES(?,?)',('catalogue-draft:'+key,json.dumps(draft)))
+        return {'draft_id':key,'fields':fields,'offer':self.catalogue(profile,payload['kind'])[0],'options':draft['options'],'expires_at':draft['expires_at']}
     def prepare(self,profile,payload):
+        if payload.get('draft_id'):
+            from .catalogue import configure_draft
+            return configure_draft(self,profile,payload)
         value=2.0*payload['quantity'];quote={'prices':{'withTax':{'value':value,'currencyCode':'EUR'},'withoutTax':{'value':value,'currencyCode':'EUR'},'tax':{'value':0,'currencyCode':'EUR'}},'contracts':[],
                                          'details':[{'description':'Simulation hors ligne','quantity':payload['quantity']}],'simulated':True}
         return {'cart_id':'DEMO-'+payload['purchase_id'],'supplier_quote':quote,'quote_digest':digest(quote_binding(quote)),'expires_at':time.time()+900,'required_configurations':[]}
     def call(self,method,path,data=None):
+        if path.startswith('/order/cart/DEMO-'):
+            if method=='POST' and path.endswith('/configuration'):return {'simulated':True}
+            if method=='GET' and path.endswith('/checkout'):
+                nonce=path.split('/')[3].removeprefix('DEMO-')
+                records=self.store.rows('SELECT value FROM settings WHERE name=?',('catalogue-draft:'+nonce,))
+                draft=json.loads(records[0]['value']) if records else {}
+                value=2*(draft.get('selection') or {}).get('quantity',1)+len(draft.get('options',[]))
+                quote={'prices':{'withTax':{'value':value,'currencyCode':'EUR'}},'contracts':[],'details':[{'description':'Simulation hors ligne'}],'simulated':True}
+                return quote
         raise Conflict('Le fournisseur de démonstration ne dispose pas d’API réelle.')
     def checkout(self,cart_id,auto_pay=False):return {'orderId':'DEMO-'+cart_id,'url':None,'simulated':True}

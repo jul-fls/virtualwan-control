@@ -149,6 +149,10 @@ def create_app(test_config=None):
     def setup_router(key):return jsonify(job_id=control.request_router_setup(key,request.get_json())),202
     @app.post('/api/deployments')
     def deploy():return jsonify(job_id=control.request_deploy(request.get_json())),202
+    @app.post('/api/deployments/<key>/retire')
+    def retire(key):return jsonify(job_id=control.request_retire(key,request.get_json())),202
+    @app.post('/api/ips/<ip>/prepare')
+    def prepare_ip(ip):return jsonify(job_id=control.request_stock(ip)),202
     @app.put('/api/secrets/<name>')
     def secret_save(name):
         store.secret_set(name,request.get_json()['value']);store.event(ident(),'secret.saved',name=name);return jsonify(ok=True)
@@ -159,6 +163,16 @@ def create_app(test_config=None):
         return jsonify(offers=control.provider(p,run).catalogue(p,kind))
     @app.post('/api/purchases')
     def purchase():return jsonify(**control.request_quote(request.get_json())),202
+    @app.get('/api/catalogue/<key>/router/options')
+    def catalogue_options(key):
+        p=store.document('profiles',key)
+        return jsonify(options=control.provider(p,ident()).option_catalogue(p,request.args['planCode']))
+    @app.post('/api/catalogue/<key>/configure')
+    def catalogue_configure(key):
+        p=store.document('profiles',key);body=request.get_json()
+        if body.get('kind') not in ('router','additional_ip'):raise ValueError('Type de produit invalide.')
+        body['quantity']=domain.positive(body.get('quantity',1),16 if body['kind']=='additional_ip' else 1)
+        return jsonify(**control.provider(p,ident()).describe(p,body))
     @app.post('/api/purchases/<key>/approve')
     def approve(key):return jsonify(**control.approve(key,request.get_json(),g.session['user']))
     @app.post('/api/purchases/<key>/cancel')
@@ -204,7 +218,8 @@ def create_app(test_config=None):
         with store.tx() as db:
             row=db.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
             if not row:raise KeyError(key)
-            if row['kind']!='deploy' or row['state'] not in ('failed','interrupted'):raise domain.Conflict('Seuls les déploiements échoués/interrompus peuvent être repris, jamais les achats.')
+            if row['kind'] not in ('deploy','retire','stock_dns') or row['state'] not in ('failed','interrupted'):raise domain.Conflict('Seuls les jobs techniques échoués/interrompus peuvent être repris, jamais les achats.')
+            if row['kind'] in ('retire','stock_dns') and not (row['kind']=='retire' and json.loads(row['payload'])['client']['ip'] is None) and not db.execute('SELECT 1 FROM ip_pool WHERE job_id=?',(key,)).fetchone():raise domain.Conflict('Ce job ne possède plus l’IP ; ne pas rejouer une ancienne opération.')
             db.execute("UPDATE jobs SET state='queued',updated_at=? WHERE id=?",(time.time(),key))
             db.execute("UPDATE ip_pool SET state='reserved' WHERE job_id=?",(key,))
         store.event(key,'deployment.retry.requested',user=g.session['user']);return jsonify(ok=True),202

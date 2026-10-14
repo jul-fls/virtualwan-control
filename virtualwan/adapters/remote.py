@@ -108,6 +108,128 @@ def main():
         if c['primary_ip'] != q['primary_ip']:
             raise ValueError('VPS primary IP mismatch')
         emit({'config': c, 'route': run('ip', '-4', 'route', 'get', '1.1.1.1')})
+    elif action == 'vps_idle_ip':
+        import base64
+        path=Path(q['path']);before=path.read_bytes();c=json.loads(before)
+        ip=str(ipaddress.IPv4Address(q['ip']))
+        if c['primary_ip']!=q['primary_ip'] or ip==c['primary_ip']:raise ValueError('Primary IP must never be released')
+        route=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
+        if route.get('prefsrc')!=q['primary_ip']:raise ValueError('Management source mismatch')
+        binary=Path('/usr/local/sbin/virtualwan');original=binary.read_bytes()
+        if b'Virtualwan' not in original and b'virtualwan' not in original:raise ValueError('Unknown router executable')
+        source=base64.b64decode(q['source_base64'],validate=True)
+        if hashlib.sha256(source).hexdigest()!=q['source_sha256']:raise ValueError('Executable digest mismatch')
+        backup=Path('/var/lib/virtualwan/runs')/q['run_id'];backup.mkdir(parents=True,mode=0o700,exist_ok=True)
+        (backup/'router.before.py').write_bytes(original);(backup/'router.before.json').write_bytes(before)
+        for file in backup.iterdir():file.chmod(0o600)
+        c['additional_ips']=[x for x in c['additional_ips'] if x!=ip]
+        c['inactive_ips']=sorted(set(c.get('inactive_ips',[]))|{ip})
+        binary.write_bytes(source);binary.chmod(0o700)
+        try:
+            path.write_text(json.dumps(c));path.chmod(0o600)
+            run(str(binary),'validate');run('systemctl','reload','virtualwan')
+            after=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
+            if after.get('dev')!=route['dev'] or after.get('prefsrc')!=q['primary_ip']:raise ValueError('Management route changed')
+        except Exception:
+            binary.write_bytes(original);binary.chmod(0o700);path.write_bytes(before)
+            run('systemctl','reload','virtualwan');raise
+        emit({'inactive_ip':ip,'persistent_blackhole':True,'management_unchanged':True})
+    elif action in ('pve_retire_check','pve_retire_stop','pve_retire_destroy','pve_retire_unregister','pve_retire_detach'):
+        import fcntl,time
+        client=q['client'];vmid=int(client['vmid'])
+        if vmid==int(p['template']):raise ValueError('Template deletion forbidden')
+        registry_path=Path('/etc/pve/virtualwan-isolation.json');registry=json.loads(registry_path.read_text())
+        reg=registry.get('segments',{}).get(p['isolation_segment']) if p.get('isolation_segment') else registry
+        if not reg:raise ValueError('Unknown client segment')
+        registered=next((v for v in reg['clients'] if int(v['vmid'])==vmid),None)
+        def matching(v):return v and all(str(v[k]).lower()==str(client[k]).lower() for k in ('vmid','mac','public_ip','next_hop'))
+        resources=json.loads(run('pvesh','get','/cluster/resources','--type','vm','--output-format','json'))
+        vm=next((v for v in resources if int(v['vmid'])==vmid),None)
+        manifest=Path('/var/lib/virtualwan-retire')/(str(vmid)+'.json')
+        saved=json.loads(manifest.read_text()) if manifest.exists() else None
+        detached=bool(saved and saved.get('detached') and matching(saved['client']))
+        detach_pending=detached
+        if not matching(registered) and (registered or vm) and not (not registered and detached):raise ValueError('Client registration ownership mismatch')
+        node=vm['node'] if vm else client.get('node',p['node'])
+        if node not in reg['nodes']:raise ValueError('VM outside managed nodes')
+        conf=json.loads(run('pvesh','get',f'/nodes/{node}/qemu/{vmid}/config','--output-format','json')) if vm else None
+        if conf:
+            net=dict(x.split('=',1) for x in conf.get('net0','').split(',') if '=' in x)
+            detached=detach_pending and not conf.get('net0')
+            if not registered and not detached:raise ValueError('Unregistered VM is not safely detached')
+            if detached:
+                if conf.get('net0') or conf.get('name')!=saved['config'].get('name') or {k:v for k,v in conf.items() if re.fullmatch(r'(scsi|virtio|sata|ide)[0-9]+',k)}!=saved['disks']:raise ValueError('Detached VM identity changed')
+            if conf.get('template') or (not detached and (net.get('virtio','').lower()!=client['mac'].lower() or net.get('bridge')!=reg['nodes'][node]['bridge'])):
+                raise ValueError('Actual VM identity differs from recorded client')
+            if conf.get('lock'):raise ValueError('VM locked or migrating; retry after operator inspection')
+        if vm and action in ('pve_retire_stop','pve_retire_destroy','pve_retire_detach'):
+            actual=json.loads(run('pvesh','get',f'/nodes/{node}/qemu/{vmid}/status/current','--output-format','json'))
+            vm['status']=actual['status']
+        def task(method,path):
+            upid=run('pvesh',method,path,'--output-format','json').strip();upid=json.loads(upid)
+            deadline=time.monotonic()+150
+            while True:
+                status=json.loads(run('pvesh','get',f'/nodes/{node}/tasks/{upid}/status','--output-format','json'))
+                if status['status']=='stopped':
+                    if status.get('exitstatus')!='OK':raise ValueError('Proxmox task failed')
+                    return
+                if time.monotonic()>deadline:raise ValueError('Proxmox task still running; no automatic retry')
+                time.sleep(1)
+        if action=='pve_retire_check':emit({'exists':bool(vm),'config':conf,'node':node})
+        elif action=='pve_retire_stop':
+            if vm and vm['status']!='stopped':task('create',f'/nodes/{node}/qemu/{vmid}/status/stop')
+            emit({'stopped':True})
+        elif action=='pve_retire_detach':
+            if not vm:raise ValueError('VM missing: cannot preserve it')
+            if vm['status']!='stopped':raise ValueError('VM must be stopped before network detachment')
+            expected_hook=p['snippet_storage']+':snippets/virtualwan-isolation-hook.pl'
+            if conf.get('hookscript') not in (None,expected_hook):raise ValueError('Foreign hookscript: operator intervention required')
+            if any(re.fullmatch(r'net[1-9][0-9]*',k) for k in conf):raise ValueError('Additional NIC: operator intervention required')
+            if not detached:
+                manifest.parent.mkdir(parents=True,mode=0o700,exist_ok=True)
+                saved={'client':client,'config':conf,'disks':{k:v for k,v in conf.items() if re.fullmatch(r'(scsi|virtio|sata|ide)[0-9]+',k)},'cicustom':conf.get('cicustom',''),'detached':True}
+                manifest.write_text(json.dumps(saved));manifest.chmod(0o600)
+            remove=','.join(k for k in ('net0','hookscript') if k in conf)
+            if remove:run('pvesh','set',f'/nodes/{node}/qemu/{vmid}/config','--delete',remove,'--digest',conf['digest'])
+            actual=json.loads(run('pvesh','get',f'/nodes/{node}/qemu/{vmid}/config','--output-format','json'))
+            if actual.get('net0') or actual.get('hookscript'):raise ValueError('Network detachment incomplete')
+            emit({'detached':True,'vmid':vmid,'disks_preserved':True})
+        elif action=='pve_retire_destroy':
+            recovery=Path('/var/lib/virtualwan-retire');recovery.mkdir(parents=True,mode=0o700,exist_ok=True)
+            manifest=recovery/(str(vmid)+'.json')
+            if vm:
+                if vm['status']!='stopped':raise ValueError('VM must be stopped before deletion')
+                if not detached:
+                    manifest.write_text(json.dumps({'client':client,'cicustom':conf.get('cicustom','')}));manifest.chmod(0o600)
+                task('delete',f'/nodes/{node}/qemu/{vmid}')
+            if manifest.exists():
+                saved=json.loads(manifest.read_text())
+                if not matching(saved['client']):raise ValueError('Snippet recovery ownership differs')
+                refs=dict(part.split('=',1) for part in saved['cicustom'].split(',') if '=' in part)
+                directory=Path(p['snippet_directory']).resolve()
+                for kind in ('network','user'):
+                    name=f'virtualwan-{vmid}-{kind}.yaml'
+                    if refs.get(kind)==p['snippet_storage']+':snippets/'+name:
+                        target=(directory/name).resolve()
+                        if target.parent!=directory:raise ValueError('Snippet outside configured directory')
+                        target.unlink(missing_ok=True)
+                manifest.unlink()
+            emit({'deleted':True,'vmid':vmid,'snippets_cleaned':True})
+        else:
+            if vm and not (detached and not conf.get('net0')):raise ValueError('VM still connected: keep isolation registration')
+            with open('/run/virtualwan-isolation.lock','w') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX)
+                current=json.loads(registry_path.read_text());segment=current['segments'][p['isolation_segment']] if p.get('isolation_segment') else current
+                existing=next((v for v in segment['clients'] if int(v['vmid'])==vmid),None)
+                if existing and not matching(existing):raise ValueError('Registration changed during deletion')
+                segment['clients']=[v for v in segment['clients'] if int(v['vmid'])!=vmid]
+                temp=registry_path.with_suffix('.json.retiring');temp.write_text(json.dumps(current));os.replace(temp,registry_path)
+            import shlex
+            for n,definition in reg['nodes'].items():
+                cmd=['/usr/local/sbin/virtualwan-isolation','apply','--force']
+                if n!=run('hostname','-s').strip():cmd=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o',f'HostKeyAlias={n}','-o',f'UserKnownHostsFile=/etc/pve/nodes/{n}/ssh_known_hosts','root@'+definition['address'],shlex.join(cmd)]
+                run(*cmd)
+            emit({'unregistered':True,'vmid':vmid})
     elif action == 'vps_apply':
         path = Path(q['path'])
         before = path.read_bytes()
@@ -125,6 +247,7 @@ def main():
         os.chmod(backup / 'vps-config.before.json', 0o600)
         audit('vps.backup.saved', path=str(backup / 'vps-config.before.json'))
         c['additional_ips'].append(q['ip'])
+        if 'inactive_ips' in c:c['inactive_ips']=[ip for ip in c['inactive_ips'] if ip!=q['ip']]
         fd, temp = tempfile.mkstemp(dir=path.parent, prefix='.virtualwan-')
         try:
             with os.fdopen(fd, 'w') as f:

@@ -314,3 +314,87 @@ Ensuite, relancer Lire les VM ; les erreurs signalent cette étape manquante.
 Conserver /data sur le volume persistant. Après changement d’environnement,
 recréer le conteneur pour charger les valeurs (un simple restart ne recharge
 pas le fichier .env).
+
+## Devis guidés et restitution des IP
+
+Achats & approbations utilise le catalogue OVH disponible pour votre compte :
+filtre SSD/NVMe, RAM de la gamme, CPU/disque affichés, options par famille,
+durée, localisation et OS. Les IP disposent de choix de pays lorsque l’offre
+les propose. Les paramètres sont des champs/selecteurs, sans JSON à recopier.
+CPU/RAM/disque principal sont liés à la gamme ; aucun dimensionnement libre
+non proposé par OVH n’est inventé. Les prix affichés dans les choix sont HT ;
+le devis final TTC et les contrats restent soumis à confirmation humaine.
+
+Les sélections créent des paniers non payés de quinze minutes, liés au profil
+et utilisables une seule fois pour préparer le devis. Les options obligatoires
+et exclusives, les valeurs proposées et les changements de profil sont contrôlés.
+Les nouveaux paniers requièrent les droits POST/GET /order/cart/*, notamment
+les routes vps/options ; aucun checkout n’est envoyé par la sélection.
+
+La même page liste les VM clientes et sépare Libérer l’IP, Supprimer la VM
+et Supprimer & libérer l’IP. Pour cette dernière action :
+Cette action détruit les disques de la VM après confirmation SUPPRIMER.
+Elle ne résilie pas le VPS routeur OVH et ne rend pas l’IP au fournisseur :
+l’IP reste achetée pour un futur client. Le nettoyage vérifie VMID/MAC/bridge,
+registre d’isolation, routes, gateway, réservation Kea/ARP et règles gérées.
+Les états pfSense sont purgés uniquement pour cette IP ; le LAN et les autres
+clients ne sont pas réinitialisés. L’alias des IP possédées est conservé.
+
+Une IP neuve ou restituée reçoit un A DNS-only et un PTR au même nom classique
+que pour un nouveau déploiement : vps-127012.hosting.example.net pour 127.0.1.2,
+avec le hostname_pattern du profil (défaut vps-{ipv4_compact}.{domain}).
+Le reset envoie explicitement DELETE/POST à OVH, même si le PTR est déjà classique,
+puis vérifie sa valeur ; un PTR personnalisé est ainsi écrasé à la restitution.
+L’attribution à un client conserve ce format de déploiement habituel.
+Le routeur distingue additional_ips (clients) et inactive_ips (stock), avec
+blackhole /32 persistant et refus de forwarding pour le stock. La première
+préparation de stock met à jour uniquement son outil Virtualwan, avec sauvegarde
+du script/config existants et vérification de la route primaire. Le nouveau
+format accepte toujours les anciens fichiers sans inactive_ips.
+
+L’IP n’est disponible qu’après vérification DNS/PTR et nettoyage complet.
+Un échec laisse l’IP en quarantaine et le journal pour inspection/reprise du
+même job. Les DNS non gérés ou alias résiduels ne sont pas supprimés aveuglément
+et bloquent la restitution. Avant de classer une IP synchronisée libre, le
+registre PVE et les routes pfSense sont lus : un client existant non importé
+ne doit pas être coupé. Préparer/réinitialiser DNS permet de reprendre un stock
+non affecté ; une IP affectée à une VM est refusée par cette action.
+
+Les nouveaux achats/nettoyages doivent être testés sur une VM jetable et un
+petit achat contrôlé avant production. Les validations locales utilisent des
+simulations et des fixtures ; aucun achat ni suppression réel n’a été effectué.
+
+
+### Libérer une IP ou supprimer une VM
+
+Dans **Achats & approbations**, les actions sont indépendantes :
+
+- **Libérer l’IP** (`LIBERER`) : arrêt de la VM, retrait de sa carte `net0`
+  publique et de son hook Virtualwan, nettoyage des routes et de l’isolation.
+  La VM, ses disques, ses snippets et sa console sont conservés ; elle apparaît
+  « Sans réseau public ». Son raccordement à une autre IP/réseau reste manuel.
+- **Supprimer la VM** (`SUPPRIMER`) : suppression définitive de la VM et de ses
+  disques, nettoyage réseau. L’IP reste réservée, son DNS/PTR est conservé.
+  **Préparer / réinitialiser DNS** permet ensuite de restituer explicitement
+  cette IP au stock.
+- **Supprimer & libérer l’IP** (`SUPPRIMER`) : les deux opérations, avec retour
+  au stock après vérification DNS/PTR.
+
+Une VM déjà détachée peut être supprimée sans toucher à son ancienne IP,
+qui peut avoir été réattribuée à une autre VM. Une migration SQLite automatique
+conserve les déploiements existants et autorise les VM sans IP publique.
+
+Chaque restitution envoie explicitement à OVH le PTR classique défini par
+`hostname_pattern`, par défaut `vps-{ipv4_compact}.{domain}`. Un PTR client
+personnalisé est remplacé. Une suppression seule ne déclenche aucun changement
+DNS/PTR et aucune de ces actions ne résilie l’abonnement routeur OVH.
+
+Les modifications sont journalisées par run. Un échec partiel conserve la fiche
+VM et met l’IP en quarantaine ; inspecter le journal puis reprendre le même job.
+Sur PVE, un manifeste privé dans `/var/lib/virtualwan-retire/` permet de vérifier
+la propriété d’une VM détachée avant sa suppression ultérieure. Ne pas réutiliser
+son VMID, modifier ses disques ou supprimer ce manifeste avant la fin du parcours.
+Une carte supplémentaire ou un hook tiers interdit le détachement automatique.
+Les parcours réels PVE/pfSense et les reprises après panne restent à tester sur
+une VM jetable avant utilisation client ; les tests automatisés utilisent des
+fixtures et le mode démonstration sans appels d’infrastructure.

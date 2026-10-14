@@ -12,7 +12,8 @@ def bundle(profile,ips):
         'wireguard_interface':'wg-vwan','listen_port':router.get('listen_port',51820),
         'mtu':router.get('mtu',1420),'tunnel_address':router.get('tunnel_address'),
         'peer_address':router.get('peer_address'),'peer_public_key':router.get('peer_public_key'),
-        'additional_ips':[i['ip'] for i in ips]}
+        'additional_ips':[i['ip'] for i in ips if i.get('state','assigned')=='assigned'],
+        'inactive_ips':[i['ip'] for i in ips if i.get('state','assigned')!='assigned']}
     segment=cfg['pve'].get('isolation_segment') or 'legacy'
     registry={'nodes':{cfg['pve']['node']:{'bridge':cfg['pve']['bridge'],'uplink':'REPLACE_ACTUAL_UPLINK_PORT','address':cfg['pve']['host']}},
               'bridge':cfg['pve']['bridge'],'uplink':'REPLACE_ACTUAL_UPLINK_PORT',

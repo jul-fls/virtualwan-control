@@ -271,9 +271,9 @@ class Ovh:
         self.path = '/ip/' + self.block + '/reverse/' + quote(ip, safe='')
         return self.call('GET', self.path, allow404=True)
 
-    def ensure(self, ip, fqdn):
+    def ensure(self, ip, fqdn, force=False):
         old = self.call('GET', self.path, allow404=True)
-        if old and old.get('reverse', '').rstrip('.') == fqdn:
+        if old and old.get('reverse', '').rstrip('.') == fqdn and not force:
             return
         self.log.backup('ovh-reverse.before.json', json.dumps(old).encode())
         if old:

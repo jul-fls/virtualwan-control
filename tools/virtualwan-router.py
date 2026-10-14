@@ -43,7 +43,7 @@ def load(path):
     required = {'primary_ip', 'wan_interface', 'wireguard_interface',
                 'listen_port', 'mtu', 'tunnel_address', 'peer_address',
                 'peer_public_key', 'additional_ips'}
-    if set(c) != required:
+    if set(c) - {'inactive_ips'} != required:
         raise ValueError('Unexpected/missing configuration fields')
     if c['wireguard_interface'] != 'wg-vwan':
         raise ValueError('This installation reserves interface wg-vwan')
@@ -55,7 +55,7 @@ def load(path):
     if peer not in tunnel.network or peer == tunnel.ip or peer in (
             tunnel.network.network_address, tunnel.network.broadcast_address):
         raise ValueError('Invalid tunnel peer')
-    ips = [ipaddress.IPv4Address(x) for x in c['additional_ips']]
+    ips = [ipaddress.IPv4Address(x) for x in c['additional_ips']+c.get('inactive_ips',[])]
     if not 0 <= len(ips) <= 16 or len(set(ips)) != len(ips):
         raise ValueError('Expected 0-16 distinct Additional IPs')
     if not primary.is_global or primary.is_multicast or any(not x.is_global or x.is_multicast or x == primary for x in ips):
@@ -76,7 +76,7 @@ def preflight(c, state):
     local_ips = {a['local'] for i in addr for a in i['addr_info']}
     if c['primary_ip'] not in local_ips:
         raise ValueError('Primary IP not assigned: refusing to modify system')
-    if any(x in local_ips for x in c['additional_ips']):
+    if any(x in local_ips for x in c['additional_ips']+c.get('inactive_ips',[])):
         raise ValueError('Additional IP already assigned locally; audit required')
     default = json.loads(run('ip', '-j', '-4', 'route', 'get', '1.1.1.1'))[0]
     if default.get('dev') != c['wan_interface'] or default.get('prefsrc') != c['primary_ip']:
@@ -86,7 +86,7 @@ def preflight(c, state):
         raise ValueError('Changing management/interface/tunnel requires rollback first')
     routes = json.loads(run('ip', '-N', '-j', '-4', 'route', 'show', 'table', 'main'))
     for r in routes:
-        if r.get('dst', '').removesuffix('/32') in c['additional_ips']:
+        if r.get('dst', '').removesuffix('/32') in c['additional_ips']+c.get('inactive_ips',[]):
             managed = (state is not None and str(r.get('protocol')) == '186' and
                        ((r.get('dev') == 'wg-vwan' and r.get('metric') == 20) or
                         (str(r.get('type')) in ('blackhole', '6') and r.get('metric') == 32767)))
@@ -98,11 +98,13 @@ def preflight(c, state):
         raise ValueError('nft table virtualwan already exists without managed state')
 
 def firewall(c):
-    ips = ', '.join(c['additional_ips'])
+    ips = ', '.join(c['additional_ips']+c.get('inactive_ips',[]))
+    inactive=', '.join(c.get('inactive_ips',[]))
     wan = c['wan_interface']
     wg = c['wireguard_interface']
     return f'''table inet virtualwan {{
  set public_ips {{ type ipv4_addr; elements = {{ {ips} }}; }}
+ set inactive_ips {{ type ipv4_addr; elements = {{ {inactive} }}; }}
  chain input {{
   type filter hook input priority -10; policy accept;
   iifname "{wg}" ip saddr {c['peer_address']} ip daddr {ipaddress.ip_interface(c['tunnel_address']).ip} ip protocol icmp accept
@@ -114,6 +116,8 @@ def firewall(c):
  }}
  chain forward {{
   type filter hook forward priority -10; policy accept;
+  ip daddr @inactive_ips counter drop
+  ip saddr @inactive_ips counter drop
   iifname "{wan}" oifname "{wg}" ip daddr @public_ips counter accept
   iifname "{wg}" oifname "{wan}" ip saddr @public_ips counter accept
   iifname "{wg}" counter drop
@@ -153,7 +157,7 @@ def apply(c):
     run('sysctl', '-q', '-w', 'net.ipv4.ip_forward=1')
     for scope in ['all', 'default', c['wan_interface']]:
         run('sysctl', '-q', '-w', f'net.ipv4.conf.{scope}.rp_filter=2')
-    for ip in c['additional_ips']:
+    for ip in c['additional_ips']+c.get('inactive_ips',[]):
         run('ip', '-4', 'route', 'replace', 'blackhole', ip + '/32',
             'metric', '32767', 'proto', '186')
     if not run('ip', 'link', 'show', 'wg-vwan', check=False):
@@ -173,7 +177,12 @@ def apply(c):
         run('ip', '-4', 'route', 'replace', ip + '/32', 'dev', 'wg-vwan',
             'metric', '20', 'proto', '186')
         run('ip', 'neigh', 'replace', 'proxy', ip, 'dev', c['wan_interface'])
-    for ip in set(state['config']['additional_ips']) - set(c['additional_ips']):
+    for ip in c.get('inactive_ips',[]):
+        run('ip','-4','route','del',ip+'/32','metric','20','proto','186',check=False)
+        run('ip','neigh','del','proxy',ip,'dev',c['wan_interface'],check=False)
+    old=set(state['config']['additional_ips']+state['config'].get('inactive_ips',[]))
+    new=set(c['additional_ips']+c.get('inactive_ips',[]))
+    for ip in old - new:
         remove_ip(ip, c['wan_interface'])
     state['config'] = c
     write(STATE, json.dumps(state, indent=2) + '\n')
@@ -213,7 +222,7 @@ def rollback():
     state = json.loads(STATE.read_text())
     run('systemctl', 'disable', 'virtualwan.service', check=False)
     down()
-    for ip in state['config']['additional_ips']:
+    for ip in state['config']['additional_ips']+state['config'].get('inactive_ips',[]):
         remove_ip(ip, state['config']['wan_interface'])
     run('nft', 'delete', 'table', 'inet', 'virtualwan', check=False)
     for k, v in state['original_sysctls'].items():

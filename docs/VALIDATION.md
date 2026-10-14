@@ -119,3 +119,46 @@ to the selected profile, with explicit selection required for multiple profiles.
 The SSH preflight now reports the UI enrollment action before spawning PVE
 inventory when the host-key file/key is missing. RejectPolicy remains enabled.
 This change was tested locally without contacting pfSense, PVE or the router.
+
+## Guided catalogue and client retirement
+
+Official OVH order schemas and public VPS metadata were read to implement
+offers, options, required configuration values, country/datacenter selectors
+and technical CPU/RAM/SSD information. Source pfSense native delete forms
+were inspected; actual target firewall deletions have not been executed.
+
+The regression suite covers bound catalogue drafts, lifecycle reservations,
+foreign VM/template refusals, pfSense ownership checks and inactive IP policy.
+The headless browser exercised both guided quote forms, a router disk option,
+country/datacenter selection and retirement of a simulated client. No purchase
+approval was sent, no actual customer VM or provider resource was deleted.
+
+The new inactive_ips router extension, pfSense native cleanup and Proxmox
+delete paths require a controlled live test on a disposable VM before use
+in production. Defaults still require enabled provisioning/purchases and
+explicit human confirmation. Partial cleanup keeps the IP quarantined.
+
+Final validation: all 98 Linux tests pass, including legacy bootstrap compatibility,
+stock isolation/primary protection and atomic purchase follow-up reservation.
+The final eight-page browser test passed both guided quote flows and a simulated
+client retirement without approval or external requests. No JavaScript errors.
+
+
+## Independent VM deletion and IP release
+
+The 113-test Linux suite includes preservation of a detached VM, explicit IP
+reservation after VM-only deletion, subsequent deletion without touching a
+reassigned IP, nullable deployment migration, and adapter call boundaries.
+OVH PTR tests confirm an explicit DELETE/POST/readback even for an already
+matching conventional PTR, and replacement of a customer-defined PTR.
+Normal VM assignment remains idempotent.
+
+The eight-page localhost demo browser test passed guided quotes, VM creation,
+IP-only release with the VM retained and subsequent deletion of that detached
+VM. No JavaScript errors, purchase approvals or external API requests.
+The shared action dispatch also has unit coverage for combined deletion/release.
+
+Real Proxmox network detachment and deletion, pfSense cleanup and actual OVH
+PTR reset are not validated against production. Test the three actions and
+partial-failure retries on a disposable VM. Retained VMs require a manual
+network reconnection; the app does not yet automate reassignment to a kept VM.
