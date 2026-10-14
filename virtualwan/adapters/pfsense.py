@@ -1,3 +1,4 @@
+import json
 """pfSense WebGUI HTTPS adapter: session cookies, CSRF and native forms only."""
 import hashlib
 import ipaddress
@@ -302,7 +303,7 @@ class PfSense:
         response=self.request('POST',page,data={**values,'__csrf_magic':token['value']})
         if BeautifulSoup(response.text,'html.parser').select('.alert-danger'):raise ValueError('Suppression pfSense refusée sur '+page)
 
-    def retire(self,ip,client):
+    def retire(self,ip,client,check_only=False):
         ip=str(ipaddress.IPv4Address(ip));c=self.cfg;gw='VWAN_'+ip.replace('.','')
         targets=[
             ('filter/rule','firewall_rules.php?if='+c['wireguard_interface'],lambda r:r.findtext('descr')=='Virtualwan incoming '+ip,
@@ -317,9 +318,20 @@ class PfSense:
         ]
         root=self.snapshot('retire.before')
         # Verify all ownership predicates before removing the first object.
+        conflicts=[]
         for xpath,page,find,owns in targets:
             matched=[r for r in root.findall(xpath) if find(r)]
-            if len(matched)>1 or any(not owns(r) for r in matched):raise ValueError('Conflit de propriété pfSense : '+xpath)
+            if len(matched)>1 or any(not owns(r) for r in matched):
+                conflicts.append({'resource':xpath,'count':len(matched),'observed':[
+                    {k:r.findtext(k) for k in ('network','gateway','interface','name','ipaddr','mac','descr') if r.find(k) is not None}
+                    for r in matched]})
+        if conflicts:
+            expected={'gateway_name':gw,'gateway_ip':client['next_hop'],'interface':c['public_interface'],'mac':client['mac'],'dhcp_description':'Virtualwan '+ip}
+            if getattr(self,'log',None):self.log.event('pfsense.retire.ownership_conflict',ip=ip,expected=expected,conflicts=conflicts)
+            raise ValueError('Conflit de propriété pfSense ; attendu '+json.dumps(expected,ensure_ascii=False)+' ; observé '+json.dumps(conflicts,ensure_ascii=False)+'. Aucun objet pfSense supprimé. Vérifier les anciennes configurations manuelles.')
+        if check_only:
+            if getattr(self,'log',None):self.log.event('pfsense.retire.preflight.ok',ip=ip)
+            return root
         for xpath,page,find,owns in targets:
             root=self.snapshot('retire.pre-step')
             matched=[(i,r) for i,r in enumerate(root.findall(xpath)) if find(r)]

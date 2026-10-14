@@ -162,3 +162,21 @@ Real Proxmox network detachment and deletion, pfSense cleanup and actual OVH
 PTR reset are not validated against production. Test the three actions and
 partial-failure retries on a disposable VM. Retained VMs require a manual
 network reconnection; the app does not yet automate reassignment to a kept VM.
+
+
+## Recovery of blocked lifecycle operations
+
+124 Linux tests pass. Recovery tests cover old persisted retiring states,
+failed/interrupted/cancelled job presentation, preservation of VM/IP ownership,
+queued cancellation without adapter calls, retry of the same job, rejection
+of concurrent running-job recovery and rejection after IP reassignment.
+Job failure updates and resource quarantine are transactional, and state API
+reads use one consistent database snapshot.
+
+A localhost-only browser test seeded an old failed retirement whose VM still
+had the retiring label. It verified the repaired label, cancellation directly
+from the operation journal, and retry through to success using the same job.
+It polls actual JSON states from Node and asserts terminal success; no purchase
+approval or production infrastructure was contacted. No JavaScript errors.
+Cancellation keeps partial resources and quarantines the IP; it is not rollback.
+Active remote commands cannot be cancelled or replayed concurrently.

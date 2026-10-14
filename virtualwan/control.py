@@ -78,7 +78,52 @@ class Control:
             if not self.demo and self.allow_provision:self.queue_stock(profile_id,ip,db)
 
     def deployments(self):
-        return [{**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}} for row in self.store.rows('SELECT * FROM deployments ORDER BY rowid DESC')]
+        clients=[]
+        for row in self.store.rows('SELECT * FROM deployments ORDER BY rowid DESC'):
+            client={**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}}
+            key=client.get('retirement_job')
+            if key:
+                jobs=self.store.rows('SELECT id,kind,state,result FROM jobs WHERE id=?',(key,))
+                if jobs:
+                    job=jobs[0];job['result']=json.loads(job['result']);client['lifecycle_job']=job
+                    # Repair the displayed state for failures recorded by older versions.
+                    if job['state'] in ('failed','interrupted','cancelled'):client['status']='retirement_'+job['state']
+                    elif job['state'] in ('queued','running'):client['status']='releasing' if json.loads(self.store.one('SELECT payload FROM jobs WHERE id=?',(key,))['payload']).get('mode')=='release' else 'retiring'
+            clients.append(client)
+        return clients
+
+    def recover_job(self,key,action,confirmation):
+        if action not in ('retry','cancel'):raise ValueError('Action de récupération inconnue.')
+        expected=('REPRENDRE ' if action=='retry' else 'ANNULER ')+key[:8]
+        if confirmation!=expected:raise ValueError('Saisir '+expected+' pour confirmer.')
+        if not self.demo and not self.allow_provision:raise domain.Conflict('Provisionnement désactivé.')
+        with self.store.tx() as db:
+            row=db.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
+            if not row:raise KeyError(key)
+            allowed=('failed','interrupted','cancelled') if action=='retry' else ('queued','failed','interrupted')
+            if row['kind'] not in ('deploy','retire','stock_dns') or row['state'] not in allowed:
+                raise domain.Conflict('Action disponible sur une opération technique en attente, échouée ou interrompue. Un worker actif ne peut pas être annulé pendant une commande distante ; aucun achat n’est rejoué.')
+            payload=json.loads(row['payload']);client=payload.get('client')
+            ip=client['ip'] if client else payload.get('ip',payload.get('config',{}).get('public_ip'))
+            if ip and not db.execute('SELECT 1 FROM ip_pool WHERE ip=? AND job_id=?',(ip,key)).fetchone():raise domain.Conflict('Ce job ne possède plus l’IP ; reprise/annulation refusée.')
+            if row['kind']=='retire':
+                deployment=db.execute('SELECT data FROM deployments WHERE id=?',(client['id'],)).fetchone()
+                if not deployment or json.loads(deployment['data']).get('retirement_job')!=key:raise domain.Conflict('Ce job ne possède plus la VM.')
+            next_state='queued' if action=='retry' else 'cancelled'
+            result=json.loads(row['result'])
+            if action=='cancel':result.update(cancelled=True,recovery='Annulation sans rollback. Ressources partielles conservées ; IP en quarantaine. Le même job peut être repris après vérification.')
+            db.execute('UPDATE jobs SET state=?,result=?,updated_at=? WHERE id=?',(next_state,json.dumps(result),time.time(),key))
+            db.execute('UPDATE ip_pool SET state=? WHERE job_id=?',('reserved' if action=='retry' else 'quarantined',key))
+            for record in db.execute('SELECT id,data FROM deployments').fetchall():
+                info=json.loads(record['data'])
+                if info.get('retirement_job')==key:
+                    info['status']=('releasing' if payload.get('mode')=='release' else 'retiring') if action=='retry' else 'retirement_cancelled'
+                elif info.get('job_id')==key:info['status']='queued' if action=='retry' else 'cancelled'
+                else:continue
+                db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(info),record['id']))
+        self.store.event(key,'job.'+action+'.requested',previous_state=row['state'],state=next_state,rollback=False)
+        return {'ok':True,'state':next_state}
+
 
     def request_deploy(self,body,model_snapshot=None):
         profile=self.store.document('profiles',body['profile_id']);model=model_snapshot or self.store.document('models',body['model_id'])
@@ -563,13 +608,16 @@ class Control:
             self.job_state(key,'succeeded',result)
         except Exception as error:
             self.store.event(key,'job.failed',error_type=type(error).__name__,error=str(error))
-            self.job_state(key,'failed',{'error':str(error),'recovery':'Consulter les événements. Aucun retrait ou nouvel achat automatique.'})
             with self.store.tx() as db:
+                self.job_state(key,'failed',{'error':str(error),'recovery':'Consulter les événements. Aucun retrait ou nouvel achat automatique.'})
                 if row['kind'] in ('deploy','stock_dns','retire'):
                     db.execute("UPDATE ip_pool SET state='quarantined' WHERE job_id=?",(key,))
                     for r in db.execute('SELECT id,data FROM deployments').fetchall():
                         data=json.loads(r['data'])
-                        if data.get('job_id')==key:data['status']='failed';db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(data),r['id']))
+                        if data.get('retirement_job')==key:data['status']='retirement_failed'
+                        elif data.get('job_id')==key:data['status']='failed'
+                        else:continue
+                        db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(data),r['id']))
                 if row['kind']=='quote':db.execute("UPDATE purchases SET state='failed' WHERE id=? AND state='preparing'",(payload['purchase_id'],))
         return True
 

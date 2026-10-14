@@ -32,6 +32,10 @@ def main():
             pve=Remote(cfg['pve'],log)
             before=pve.call('pve_retire_check',pve=cfg['pve'],client=client)
             log.backup('vm.before.json',json.dumps(before).encode())
+            # Validate firewall ownership before stopping the VM or blackholing its IP.
+            # Revalidate again at cleanup time to detect concurrent configuration edits.
+            if ip:
+                pf=PfSense(cfg['pfsense'],log,secret);pf.login();pf.retire(ip,client,check_only=True)
             if before.get('exists'):pve.call('pve_retire_stop',pve=cfg['pve'],client=client)
         if ip and (client or cfg.get('stock_routing_ready',True)):
             vps=Remote(cfg['vps'],log)

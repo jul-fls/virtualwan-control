@@ -156,6 +156,22 @@ class AdapterLifecycleTests(unittest.TestCase):
         pve,vps,pf,cloud,ovh=self.exercise('delete',None)
         vps.call.assert_not_called();pf.assert_not_called();cloud.assert_not_called();ovh.assert_not_called()
 
+    def test_firewall_conflict_does_not_stop_vm_or_connect_router(self):
+        import tempfile
+        from virtualwan.adapters import lifecycle
+        with tempfile.TemporaryDirectory(dir=__import__('test_control').TESTROOT) as directory:
+            config={'public_ip':'8.8.8.8','domain':'hosting.example.net','lifecycle_mode':'delete_release',
+                    'retire_client':{'vmid':120,'mac':'02:00:00:00:00:01','next_hop':'10.254.251.11'},
+                    'pve':{},'vps':{'primary_ip':'9.9.9.9'},'pfsense':{},'cloudflare':{},'ovh':{}}
+            path=Path(directory)/'lifecycle.json';path.write_text(json.dumps(config))
+            pve=Mock();pve.call.return_value={'exists':True}
+            with patch.object(sys,'argv',['lifecycle',str(path)]),patch.object(lifecycle,'Journal'),patch.object(lifecycle,'Remote',return_value=pve) as remote_call,patch.object(lifecycle,'PfSense') as pf,patch.object(lifecycle,'Cloudflare'),patch.object(lifecycle,'Ovh'):
+                pf.return_value.retire.side_effect=ValueError('Legacy gateway mismatch')
+                with self.assertRaisesRegex(ValueError,'Legacy gateway'):lifecycle.main()
+                self.assertEqual([c.args[0] for c in pve.call.call_args_list],['pve_retire_check'])
+                self.assertEqual(remote_call.call_count,1)
+                pf.return_value.retire.assert_called_once_with('8.8.8.8',config['retire_client'],check_only=True)
+
 
 class PtrTests(unittest.TestCase):
     def ovh(self,old,fqdn):
@@ -173,6 +189,73 @@ class PtrTests(unittest.TestCase):
     def test_normal_assignment_is_idempotent(self):
         fqdn='vps-8888.hosting.example.net';ovh=self.ovh(fqdn,fqdn)
         ovh.ensure('8.8.8.8',fqdn);self.assertEqual(ovh.call.call_count,1)
+
+    def test_pf_legacy_conflict_reports_actual_gateway_without_deletion(self):
+        pf=PfSense.__new__(PfSense);pf.cfg={'wireguard_interface':'optwg','public_interface':'optpublic'}
+        pf.log=Mock();pf.snapshot=Mock(return_value=ET.fromstring('<pfsense><staticroutes><route><network>8.8.8.8/32</network><gateway>LEGACY_VM_GW</gateway></route></staticroutes></pfsense>'))
+        pf.native_post=Mock()
+        with self.assertRaisesRegex(ValueError,'LEGACY_VM_GW'):
+            pf.retire('8.8.8.8',{'next_hop':'10.254.251.11','mac':'02:00:00:00:00:01'},check_only=True)
+        pf.native_post.assert_not_called();pf.log.event.assert_called_once()
+    def test_pf_preflight_performs_no_deletions_or_state_purge(self):
+        pf=PfSense.__new__(PfSense);pf.cfg={'wireguard_interface':'optwg','public_interface':'optpublic'}
+        pf.log=Mock();pf.snapshot=Mock(return_value=ET.fromstring('<pfsense><staticroutes><route><network>8.8.8.8/32</network><gateway>VWAN_8888</gateway></route></staticroutes></pfsense>'))
+        pf.native_post=Mock()
+        pf.retire('8.8.8.8',{'next_hop':'10.254.251.11','mac':'02:00:00:00:00:01'},check_only=True)
+        pf.native_post.assert_not_called()
+
+
+
+class RecoveryTests(unittest.TestCase):
+    setUp=LifecycleTests.setUp
+    tearDown=LifecycleTests.tearDown
+    deploy=LifecycleTests.deploy
+    created=LifecycleTests.created
+    def failed_retirement(self):
+        c=self.created();job=self.control.request_retire(c['id'],{'confirmation':'SUPPRIMER'})
+        with patch.object(self.control,'run_lifecycle',side_effect=ValueError('gateway mismatch')):self.control.process_one()
+        return c,job
+    def test_failed_retirement_updates_vm_state(self):
+        c,job=self.failed_retirement()
+        self.assertEqual(self.control.deployments()[0]['status'],'retirement_failed')
+        self.assertEqual(self.control.deployments()[0]['lifecycle_job']['id'],job)
+    def test_old_stuck_vm_state_is_repaired_on_read(self):
+        c,job=self.failed_retirement()
+        with self.store.tx() as db:
+            data=json.loads(db.execute('SELECT data FROM deployments WHERE id=?',(c['id'],)).fetchone()['data'])
+            data['status']='retiring';db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(data),c['id']))
+        self.assertEqual(self.control.deployments()[0]['status'],'retirement_failed')
+    def test_retry_resumes_same_vm_and_lease(self):
+        c,job=self.failed_retirement();self.control.recover_job(job,'retry','REPRENDRE '+job[:8])
+        self.assertEqual(self.control.deployments()[0]['status'],'retiring')
+        self.assertEqual(self.store.one('SELECT job_id,state FROM ip_pool')['job_id'],job)
+        self.control.process_one();self.assertFalse(self.control.deployments())
+        self.assertEqual(self.store.one('SELECT state FROM ip_pool')['state'],'available')
+    def test_cancel_keeps_partial_resources_and_can_resume_same_job(self):
+        c,job=self.failed_retirement();self.control.recover_job(job,'cancel','ANNULER '+job[:8])
+        self.assertEqual(self.control.deployments()[0]['status'],'retirement_cancelled')
+        self.assertEqual(self.control.deployments()[0]['id'],c['id'])
+        self.assertEqual(self.store.one('SELECT state,job_id FROM ip_pool')['state'],'quarantined')
+        self.assertFalse(self.control.process_one())
+        self.control.recover_job(job,'retry','REPRENDRE '+job[:8]);self.control.process_one()
+        self.assertFalse(self.control.deployments())
+    def test_cancel_queued_job_never_calls_adapter(self):
+        c=self.created();job=self.control.request_retire(c['id'],{'confirmation':'SUPPRIMER'})
+        self.control.recover_job(job,'cancel','ANNULER '+job[:8])
+        with patch.object(self.control,'run_lifecycle',side_effect=AssertionError('network call')):self.assertFalse(self.control.process_one())
+    def test_running_job_cannot_be_cancelled_or_requeued(self):
+        c=self.created();job=self.control.request_retire(c['id'],{'confirmation':'SUPPRIMER'})
+        self.control.job_state(job,'running',{})
+        for action,phrase in [('cancel','ANNULER '),('retry','REPRENDRE ')]:
+            with self.assertRaises(domain.Conflict):self.control.recover_job(job,action,phrase+job[:8])
+    def test_reassigned_ip_refuses_recovery(self):
+        c,job=self.failed_retirement()
+        with self.store.tx() as db:db.execute("UPDATE ip_pool SET job_id='other-owner'")
+        for action,phrase in [('cancel','ANNULER '),('retry','REPRENDRE ')]:
+            with self.assertRaises(domain.Conflict):self.control.recover_job(job,action,phrase+job[:8])
+    def test_cancel_confirmation_is_required(self):
+        c,job=self.failed_retirement()
+        with self.assertRaises(ValueError):self.control.recover_job(job,'cancel','yes')
 
 
 class CatalogueTests(unittest.TestCase):

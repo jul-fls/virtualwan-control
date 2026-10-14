@@ -398,3 +398,40 @@ Une carte supplémentaire ou un hook tiers interdit le détachement automatique.
 Les parcours réels PVE/pfSense et les reprises après panne restent à tester sur
 une VM jetable avant utilisation client ; les tests automatisés utilisent des
 fixtures et le mode démonstration sans appels d’infrastructure.
+
+
+### Ancien montage manuel : conflit de propriété à la suppression
+
+Le nettoyage automatique attend une gateway `VWAN_<IP sans points>`, sur
+l’interface publique, pointant vers le next-hop privé de la VM, et une réservation
+DHCP/ARP décrite `Virtualwan <IP>`. Une route héritée du montage manuel peut
+utiliser un autre nom. Le journal fournit alors les valeurs attendues et observées
+et refuse la suppression : ne pas contourner ce contrôle ou supprimer la route
+sans vérifier son usage. Faire correspondre uniquement les objets dédiés à cette
+VM à la convention gérée, après vérification des adresses, MAC et références.
+
+Le précontrôle pfSense a lieu avant l’arrêt de la VM et la désactivation du
+forwarding, puis est refait pendant le nettoyage. Pour un job échoué avec une
+ancienne version, la VM peut déjà être arrêtée et l’IP blackholée ; une fois le
+conflit résolu, mettre à jour l’image et reprendre le même job via son journal.
+La reprise conserve son identité et sa réservation d’IP.
+
+
+### Reprendre ou annuler une opération technique
+
+Une suppression/libération échouée affiche son état réel sur la VM, y compris
+pour les anciens jobs qui restaient « Suppression en cours ». Le journal, les
+détails VM et Achats & approbations donnent accès à **Reprendre après vérification**
+et **Annuler l’opération**. Les confirmations sont `REPRENDRE <8 premiers caractères
+du job>` et `ANNULER <8 premiers caractères du job>`.
+
+La reprise réutilise le même job, VMID et réservation d’IP. Une annulation d’un
+job en attente, échoué ou interrompu retire ce job de la file, conserve les traces
+et ressources partielles, et laisse l’IP en quarantaine. Elle ne restaure pas une
+VM supprimée ni les routes précédentes. Le job annulé peut être repris après
+vérification ; l’IP n’est jamais libérée automatiquement à l’annulation.
+
+Une commande distante réellement en cours ne peut pas être annulée ou rejouée
+en parallèle. Après un redémarrage de l’application, les jobs en cours deviennent
+interrompus ; vérifier aussi que leurs commandes distantes sont terminées avant
+reprise. Les achats OVH ne sont jamais rejoués par ces actions.

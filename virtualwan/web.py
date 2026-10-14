@@ -119,14 +119,15 @@ def create_app(test_config=None):
 
     @app.get('/api/state')
     def state():
-        control.expire_quotes()
-        profiles=[store.document('profiles',r['id']) for r in store.rows('SELECT id FROM profiles')]
-        models=[store.document('models',r['id']) for r in store.rows('SELECT id FROM models')]
-        jobs=store.rows('SELECT id,kind,state,result,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT 100')
-        for job in jobs:job['result']=json.loads(job['result'])
-        purchases=[store.document('purchases',r['id']) for r in store.rows('SELECT id FROM purchases ORDER BY created_at DESC LIMIT 100')]
-        return jsonify(version=__version__,demo=demo,features={'purchases':control.allow_purchase or demo,'provisioning':control.allow_provision or demo},profiles=profiles,models=models,
-                       ips=store.rows('SELECT * FROM ip_pool ORDER BY profile_id,ip'),deployments=control.deployments(),jobs=jobs,purchases=purchases,secret_names=[r['name'] for r in store.rows('SELECT name FROM secrets')])
+        with store.tx():
+            control.expire_quotes()
+            profiles=[store.document('profiles',r['id']) for r in store.rows('SELECT id FROM profiles')]
+            models=[store.document('models',r['id']) for r in store.rows('SELECT id FROM models')]
+            jobs=store.rows('SELECT id,kind,state,result,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT 100')
+            for job in jobs:job['result']=json.loads(job['result'])
+            purchases=[store.document('purchases',r['id']) for r in store.rows('SELECT id FROM purchases ORDER BY created_at DESC LIMIT 100')]
+            return jsonify(version=__version__,demo=demo,features={'purchases':control.allow_purchase or demo,'provisioning':control.allow_provision or demo},profiles=profiles,models=models,
+                           ips=store.rows('SELECT * FROM ip_pool ORDER BY profile_id,ip'),deployments=control.deployments(),jobs=jobs,purchases=purchases,secret_names=[r['name'] for r in store.rows('SELECT name FROM secrets')])
     @app.post('/api/profiles')
     def profile_create():return jsonify(id=control.add_profile(request.get_json())),201
     @app.put('/api/profiles/<key>')
@@ -213,16 +214,9 @@ def create_app(test_config=None):
                                   'data':store.clean({k:v for k,v in record.items() if k not in ('time','action')})})
         return jsonify(events=sorted(rows[::-1]+subevents,key=lambda x:x['time']))
     @app.post('/api/jobs/<key>/retry')
-    def retry(key):
-        if request.get_json().get('confirmation')!='REPRENDRE '+key[:8]:raise ValueError('Confirmation de reprise requise.')
-        with store.tx() as db:
-            row=db.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
-            if not row:raise KeyError(key)
-            if row['kind'] not in ('deploy','retire','stock_dns') or row['state'] not in ('failed','interrupted'):raise domain.Conflict('Seuls les jobs techniques échoués/interrompus peuvent être repris, jamais les achats.')
-            if row['kind'] in ('retire','stock_dns') and not (row['kind']=='retire' and json.loads(row['payload'])['client']['ip'] is None) and not db.execute('SELECT 1 FROM ip_pool WHERE job_id=?',(key,)).fetchone():raise domain.Conflict('Ce job ne possède plus l’IP ; ne pas rejouer une ancienne opération.')
-            db.execute("UPDATE jobs SET state='queued',updated_at=? WHERE id=?",(time.time(),key))
-            db.execute("UPDATE ip_pool SET state='reserved' WHERE job_id=?",(key,))
-        store.event(key,'deployment.retry.requested',user=g.session['user']);return jsonify(ok=True),202
+    def retry(key):return jsonify(control.recover_job(key,'retry',request.get_json().get('confirmation'))),202
+    @app.post('/api/jobs/<key>/cancel')
+    def cancel_job(key):return jsonify(control.recover_job(key,'cancel',request.get_json().get('confirmation'))),200
     @app.get('/api/profile-example')
     def example():return jsonify(json.loads((Path(__file__).parent.parent/'examples'/'profile.json').read_text()))
     @app.get('/api/profiles/<key>/bootstrap')
