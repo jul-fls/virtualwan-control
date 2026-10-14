@@ -1,5 +1,5 @@
-import json
 """pfSense WebGUI HTTPS adapter: session cookies, CSRF and native forms only."""
+import json
 import hashlib
 import ipaddress
 import re
@@ -31,6 +31,20 @@ class PinnedTLSAdapter(HTTPAdapter):
         conn.ca_cert_dir = None
 
 
+def csrf_token(soup,context='page pfSense'):
+    # List pages may have no POST form: csrf-magic exports the same token for
+    # usepost links as an inline JS string. Read that literal without executing JS.
+    if soup.find('input',attrs={'name':'usernamefld'}) and soup.find('input',attrs={'name':'passwordfld'}):
+        raise ValueError('Session pfSense expirée ou authentification refusée sur '+context)
+    field=soup.find('input',attrs={'name':'__csrf_magic'})
+    if field and field.get('value'):return field['value']
+    for script in soup.find_all('script'):
+        if script.get('src'):continue
+        match=re.search(r"\b(?:var\s+)?csrfMagicToken\s*=\s*([\"'])(([A-Za-z0-9:;,])+?)\1\s*;",script.get_text())
+        if match:return match.group(2)
+    raise ValueError('Jeton CSRF pfSense absent sur '+context+' (champ HTML et variable csrfMagicToken). Aucune requête de modification envoyée.')
+
+
 def fields(html, required):
     soup = BeautifulSoup(html, 'html.parser')
     for form in soup.find_all('form'):
@@ -49,10 +63,7 @@ def fields(html, required):
                 data[name] = option.get('value', option.text) if option else ''
             else:
                 data[name] = el.text if el.name == 'textarea' else el.get('value', 'on' if el.get('type') == 'checkbox' else '')
-        csrf = soup.find('input', attrs={'name': '__csrf_magic'})
-        if not csrf:
-            raise ValueError('pfSense CSRF field missing')
-        data['__csrf_magic'] = csrf.get('value', '')
+        data['__csrf_magic'] = csrf_token(soup)
         return data
     raise ValueError('pfSense form differs from expected fields: ' + ','.join(required))
 
@@ -141,10 +152,8 @@ class PfSense:
     def apply(self, path):
         r = self.request('GET', path)
         soup = BeautifulSoup(r.text, 'html.parser')
-        token = soup.find('input', attrs={'name': '__csrf_magic'})
-        if not token:
-            raise ValueError('CSRF missing for apply')
-        r = self.request('POST', path, data={'__csrf_magic': token['value'], 'apply': 'Apply Changes'})
+        token=csrf_token(soup,path)
+        r = self.request('POST', path, data={'__csrf_magic': token, 'apply': 'Apply Changes'})
         if BeautifulSoup(r.text, 'html.parser').select('.alert-danger'):
             raise ValueError('pfSense apply failed')
 
@@ -298,10 +307,11 @@ class PfSense:
 
     def native_post(self,page,values):
         soup=BeautifulSoup(self.request('GET',page).text,'html.parser')
-        token=soup.find('input',attrs={'name':'__csrf_magic'})
-        if not token:raise ValueError('pfSense CSRF absent sur '+page)
-        response=self.request('POST',page,data={**values,'__csrf_magic':token['value']})
-        if BeautifulSoup(response.text,'html.parser').select('.alert-danger'):raise ValueError('Suppression pfSense refusée sur '+page)
+        token=csrf_token(soup,page)
+        response=self.request('POST',page,data={**values,'__csrf_magic':token})
+        result=BeautifulSoup(response.text,'html.parser')
+        if result.find('input',attrs={'name':'usernamefld'}):raise ValueError('Session pfSense expirée pendant la modification sur '+page)
+        if result.select('.input-errors, .alert-danger') or 'CSRF check failed' in result.get_text():raise ValueError('Modification pfSense refusée sur '+page)
 
     def retire(self,ip,client,check_only=False):
         ip=str(ipaddress.IPv4Address(ip));c=self.cfg;gw='VWAN_'+ip.replace('.','')

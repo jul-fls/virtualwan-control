@@ -180,3 +180,20 @@ It polls actual JSON states from Node and asserts terminal success; no purchase
 approval or production infrastructure was contacted. No JavaScript errors.
 Cancellation keeps partial resources and quarantines the IP; it is not rollback.
 Active remote commands cannot be cancelled or replayed concurrently.
+
+
+## pfSense list-page CSRF handling
+
+The route list may have no POST form, so a hidden __csrf_magic input is absent.
+The official csrf-magic handler also exports csrfMagicToken as an inline string
+for usepost links. The adapter now reads either representation without executing
+JavaScript. Native deletes and Apply use the current page token and session.
+Login pages, missing tokens, and CSRF rejection are refused.
+
+Ten regression fixtures cover form-free list pages, hidden fields, native delete,
+Apply, missing tokens, login responses, external scripts and unevaluated JavaScript
+expressions. These are local fixtures; actual pfSense deletion still needs the
+user's retry on the target firewall. No production changes were made here.
+
+Sources: [pfSense CSRF handler](https://raw.githubusercontent.com/pfsense/pfsense/master/src/usr/local/www/csrf/csrf-magic.php)
+and [native route deletion](https://raw.githubusercontent.com/pfsense/pfsense/master/src/usr/local/www/system_routes.php).
