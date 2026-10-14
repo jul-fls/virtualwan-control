@@ -74,7 +74,7 @@ class Store:
     def secret_get(self,name):
         if not name:return None
         rows=self.rows('SELECT ciphertext FROM secrets WHERE name=?',(name,))
-        value=self.cipher.decrypt(rows[0]['ciphertext']).decode() if rows else os.environ.get(name)
+        value=os.environ.get(name) or (self.cipher.decrypt(rows[0]['ciphertext']).decode() if rows else None)
         if value:self.redactions.add(value)
         return value
 

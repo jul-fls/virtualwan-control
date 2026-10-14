@@ -1,5 +1,6 @@
 services:
   control:
+    image: ${VWAN_IMAGE:-ghcr.io/jul-fls/virtualwan-control:latest}
     build: .
     restart: unless-stopped
     init: true

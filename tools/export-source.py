@@ -26,9 +26,9 @@ def main():
     if errors:raise ValueError('Private key content detected: '+', '.join(errors))
     out=ROOT/'dist';out.mkdir(exist_ok=True);target=out/'virtualwan-control-source.zip'
     with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED) as archive:
-        for p in selected:archive.write(p,'virtualwan-control/'+str(p.relative_to(ROOT)).replace('\\','/'))
-    manifest={str(p.relative_to(ROOT)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in selected}
+        for p in selected:archive.write(p,'virtualwan-control/'+p.relative_to(ROOT).as_posix())
+    manifest={p.relative_to(ROOT).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in selected}
     (out/'source-manifest.json').write_text(json.dumps(manifest,indent=2))
-    print(json.dumps({'archive':str(target),'files':len(selected),'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'excluded':'data, environment, keys, imports, operational parent'}))
+    print(json.dumps({'archive':str(target),'files':len(manifest),'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'excluded':'data, environment, keys, imports, operational parent'}))
 
 if __name__=='__main__':main()

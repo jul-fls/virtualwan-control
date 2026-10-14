@@ -9,9 +9,9 @@ l'invité Debian reçoit uniquement son IPv4 publique /32 via Cloud-init.
 
 ![Interface en mode démonstration](docs/images/overview.png)
 
-Le code de ce dossier est générique et destiné à devenir la racine du dépôt
-public. Les documents d'exploitation du dossier parent et ses données
-personnelles ne font pas partie de la distribution.
+Le code applicatif de ce dossier est générique. La distribution publique contient
+le code applicatif et le workflow `.github/workflows/docker-publish.yaml`. Les
+documents d’exploitation du dossier parent et ses données personnelles sont exclus.
 
 ## Ce que fait l'application
 
@@ -66,21 +66,93 @@ contient la base, la clé du coffre, les clés hôtes SSH et les journaux.
 Sauvegarder le volume chiffré ; la base seule ne suffit pas pour restaurer les
 secrets, et la base + sa clé permettent de les déchiffrer.
 
-### HTTPS sur le réseau de management
+### Une image, un serveur web, une base locale
 
-Le supplément `compose.https.yaml` fournit Caddy avec une CA interne.
-Configurer dans `.env` : `VWAN_CONTROL_HOST=control.example.net` et
-`VWAN_HTTPS_BIND_ADDRESS=IP_MANAGEMENT`. Faire résoudre ce nom vers la VM,
-installer le certificat racine Caddy sur vos postes, puis :
+Compose lance un seul conteneur : l'application Flask, Waitress et SQLite.
+Aucun Caddy, aucun PostgreSQL, aucun socket Docker. SQLite est dans le volume
+persistant `/data`. Une seule instance de la console doit accéder à ce volume.
+
+Pour utiliser l'image publiée par GitHub Actions :
 
 ```sh
-docker compose -f compose.yaml -f compose.https.yaml up -d --build
+docker compose pull
+docker compose up -d --no-build
 ```
 
-L'interface utilise alors des cookies Secure. Un reverse proxy HTTPS existant
-peut être utilisé à la place, avec `VWAN_PUBLIC_URL` égal à l'URL extérieure.
-Garder l'accès sur le réseau de management ; ceci n'est pas un portail client.
-Ne pas monter le socket Docker ni donner au conteneur le mode privileged.
+Configurer `VWAN_IMAGE` pour votre dépôt GHCR ; le défaut de cet exemple est
+`ghcr.io/jul-fls/virtualwan-control:latest`. Avant la première
+publication, `docker compose up -d --build` permet de construire localement.
+Le package GHCR doit être public pour un téléchargement anonyme.
+
+L’application écoute uniquement en **HTTP sur le port 8080**. Terminer HTTPS
+avec Cloudflare Tunnel/Access Zero Trust ou Nginx Proxy Manager, selon votre
+installation. Aucun certificat, clé TLS ni renouvellement n’est géré par l’app.
+
+Configurer `VWAN_PUBLIC_URL=https://control.example.net` avec l’URL publique
+réelle et transmettre le `Host` d’origine au backend HTTP. L’app conserve ainsi
+les cookies Secure et les contrôles Host/Origin pour les accès via le proxy.
+La connexion du proxy au conteneur utilise `http://control:8080` lorsqu’ils
+partagent un réseau Docker, ou le port publié de la VM selon votre installation.
+`VWAN_BIND_ADDRESS` choisit l’adresse du port publié ; le défaut reste localhost.
+
+L’authentification interne reste active même derrière Cloudflare Access.
+`VWAN_TRUSTED_PROXY` est facultatif : renseigner l’IP exacte du proxy direct
+pour utiliser un seul saut de `X-Forwarded-For` dans la limitation des tentatives.
+Sans cette variable, les en-têtes de forwarding ne sont pas considérés fiables.
+
+### Authentification et configuration par environnement
+
+Un compte administrateur est défini par `VWAN_ADMIN_USER` et
+`VWAN_ADMIN_PASSWORD` (12 caractères minimum, aucun mot de passe par défaut).
+Le mot de passe est vérifié via un hash scrypt ; les sessions durent huit heures
+et utilisent un cookie HttpOnly/SameSite Strict, Secure si l'URL est HTTPS.
+Les mutations exigent une session et un token CSRF. Huit tentatives en cinq
+minutes déclenchent un blocage temporaire ; cette limitation est locale au
+processus. Changer le compte/mot de passe puis redémarrer révoque les sessions.
+Cette version est une console d'administration mono-compte, sans MFA ni rôles.
+
+Toute la configuration de démarrage et tous les secrets peuvent être injectés
+par environnement ; `.env` est un exemple de chargement par Compose, pas un
+fichier de configuration obligatoire de l'application.
+
+- `VWAN_ADMIN_USER`, `VWAN_ADMIN_PASSWORD`, `VWAN_PUBLIC_URL`, `VWAN_DATA_DIR`.
+- `VWAN_DEMO`, `VWAN_ENABLE_PROVISIONING`, `VWAN_ENABLE_PURCHASES`.
+- `VWAN_PROFILES_JSON` : tableau des profils, format `examples/profile.json`,
+  chacun avec un `id` stable et unique. Interfaces, API, réseau, SSH, stockages
+  et domaine y sont configurables ; les secrets restent des références `*_env`.
+- `VWAN_MODELS_JSON` : tableau de modèles avec `id`, `name`, `range`, `cores`,
+  `memory_mb`, `disk_gb`, `template`.
+- Les variables référencées par `*_env` contiennent les identifiants OVH,
+  Cloudflare, pfSense, PVE et routeurs. **L'environnement a priorité sur le coffre**.
+- `VWAN_TRUSTED_PROXY` et `VWAN_SMTP_*`/`VWAN_APPROVAL_EMAIL` sont facultatifs.
+  `VWAN_IMAGE` et `VWAN_BIND_ADDRESS` sont utilisés par Compose.
+
+Exemple de modèle dans `.env` :
+
+```dotenv
+VWAN_MODELS_JSON='[{"id":"small","name":"Small","range":"Essentiel","cores":2,"memory_mb":2048,"disk_gb":32,"template":9001}]'
+```
+
+Les définitions d'environnement sont importées au démarrage et réappliquées
+lorsqu'elles changent. Des définitions inchangées conservent les modifications
+faites ensuite dans l'UI. Retirer un objet du JSON ne supprime jamais son
+infrastructure ni son inventaire. La base conserve les opérations et les VM ;
+les configurations et secrets n'ont pas à être remontés en fichiers JSON.
+
+### Publication GitHub Actions
+
+Le workflow `.github/workflows/docker-publish.yaml` reprend le modèle demandé :
+checkout, login GHCR avec `GITHUB_TOKEN`, puis construction et publication de
+**`ghcr.io/jul-fls/virtualwan-control:latest`**. Le contexte est la racine du dépôt.
+
+Il s’exécute sur `main`/`master` et peut être lancé manuellement. Les pull requests
+construisent l’image sans connexion au registre ni publication. Une seule image,
+un seul tag `latest`, sans matrice Python ni étapes de tests dans cette pipeline.
+Les actions suivent leurs branches courantes (`main`/`master`), sans version ou
+SHA épinglé. Le Compose utilise la même image ; `VWAN_IMAGE` reste configurable.
+
+Aucun secret OVH/pfSense/PVE/Cloudflare n’est nécessaire dans GitHub Actions.
+Le workflow publie l’image ; il ne déploie pas la console sur la VM de management.
 
 ### Démonstration sans infrastructure ni achats
 
@@ -160,14 +232,31 @@ Télécharger le dossier « Préparer le réseau » : configuration du routeur e
 fragment de registre multi-segment, outils Linux et procédure d'onboarding.
 L'opérateur vérifie VLAN, uplink, MAC pfSense, /30 du tunnel et interfaces.
 L'achat d'un serveur ne suffit pas à autoriser un remplacement aveugle du réseau.
-Les changements initiaux pfSense/PVE ne sont pas appliqués automatiquement dans
-cette version. Ensuite, les IP/VM du segment préparé se provisionnent par l'UI.
+Après livraison du VPS, renseigner ses identifiants SSH dans l'environnement,
+vérifier sa clé hôte avec la console OVH, et renseigner un /30 distinct ainsi que
+la clé publique du nouveau tunnel pfSense. Dans Routeurs, utiliser **Installer
+le routeur SSH**, puis saisir la phrase `CONFIGURER <référence>`.
+
+Cette action vérifie l'IP primaire auprès du service OVH, contrôle un Debian 13
+neuf et sa route de management, installe WireGuard/nftables, configure le service
+persistant et les routes /32. Elle arme un rollback de cinq minutes, ouvre une
+nouvelle connexion SSH et vérifie la sortie primaire avant de désarmer le timer.
+La clé WireGuard publique du routeur est retournée dans le résultat du job ;
+la reporter sur le peer pfSense. Une installation existante est refusée, sans
+mise à jour aveugle. Un échec impose une inspection du journal/rollback avant reprise.
+
+Les changements initiaux pfSense/PVE (nouveau tunnel/VLAN/bridge/isolation)
+ne sont pas appliqués automatiquement dans cette version. Les artefacts du
+bouton Préparer le réseau les documentent ; le profil reste non prêt tant que
+l'opérateur n'a pas préparé et testé ces éléments. Ensuite, les IP/VM du segment
+préparé se provisionnent par l'UI. Ce bootstrap SSH n'a pas encore fait l'objet
+d'une installation réelle sur un second VPS ; il doit être testé sur un serveur jetable.
 La limite est paramétrable à la baisse ; l'app ne commande jamais un nouveau
 routeur à votre insu lorsque le seuil est atteint.
 
 ## Architecture et périmètre
 
-Flask/Gunicorn, UI HTML/CSS/JS sans dépendances frontend externes, SQLite,
+Flask/Waitress, UI HTML/CSS/JS sans dépendances frontend externes, SQLite,
 un worker de jobs. Utiliser **un seul processus / une seule instance** ; la
 reprise et les verrous ne constituent pas une architecture multi-controller.
 Pas de facturation client, suppression automatique, HA de la console ou portail
@@ -206,4 +295,4 @@ Sources : [limite Additional IP OVH](https://www.ovhcloud.com/fr/vps/vps-ip/),
 [API /me/order](https://eu.api.ovh.com/1.0/me.json),
 [nftables bridge](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering),
 [Cloud-init Proxmox](https://pve.proxmox.com/pve-docs/chapter-qm.html#qm_cloud_init),
-[Gunicorn](https://flask.palletsprojects.com/en/stable/deploying/gunicorn/).
+[Waitress](https://flask.palletsprojects.com/en/stable/deploying/waitress/).

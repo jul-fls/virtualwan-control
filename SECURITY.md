@@ -30,7 +30,7 @@ order. No VM is assigned to an IP guessed from an unrelated concurrent order.
 
 ## Execution
 
-One Gunicorn process / one job worker; multiple controllers sharing a
+One Waitress process / one job worker; multiple controllers sharing a
 firewall are not supported. Do not increase --workers or run replicas.
 Each IP lease is acquired atomically. Failed deployments retain their IP in
 quarantine. Retry keeps the saved VMID; it must refuse foreign/drifted VMs.
@@ -47,3 +47,24 @@ not guessed interface names or silent whole-config replacement.
 For reporting a vulnerability, contact the repository maintainer privately
 using the contact method supplied on that repository. Do not publish tokens,
 private keys, customer data or full personal firewall snapshots in an issue.
+
+## HTTP behind a reverse proxy
+
+The application serves HTTP only using Waitress. TLS/certificates are managed
+by the operator's Cloudflare Tunnel/Access or Nginx Proxy Manager. Set
+VWAN_PUBLIC_URL to the actual public HTTPS URL and preserve the Host header;
+Secure cookies and origin checks remain enabled. Internal admin authentication
+is retained even behind Cloudflare Access.
+
+Use a long unique VWAN_ADMIN_PASSWORD. Changing it and restarting revokes all
+existing sessions. Environment credentials override vault values; do not publish
+.env or Docker inspect output. VWAN_TRUSTED_PROXY optionally trusts the exact
+address of one direct proxy for one X-Forwarded-For hop; wildcards are rejected.
+Otherwise forwarded client headers are ignored. The controller currently has
+one administrator account and no MFA.
+
+Fresh-router onboarding requires explicit CONFIGURER confirmation and pinned
+SSH host keys. It verifies the OVH service primary, schedules a timed rollback,
+and reconnects before cancelling it. It refuses existing installations and does
+not mark the home's firewall/bridge configuration as ready. Validate this new
+onboarding path on a disposable Debian 13 router before using it in production.

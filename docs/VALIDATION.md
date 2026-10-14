@@ -69,3 +69,45 @@ of a user's real account/browser state.
    migration and startup order on your hosts before client production.
 
 No automated live purchase is required to run this test suite or publish code.
+
+## Revision: integrated server, root CI, environment and SSH onboarding
+
+- Active workflow moved to the Git root; its Docker context is platform/.
+  actionlint passed. PR builds do not log in or publish; main/version tags publish
+  only after the Python matrix succeeds. GitHub Actions/GHCR were not executed.
+- Caddy Compose variant removed. The single-container image was built locally.
+  Previous Gunicorn HTTP/TLS checks (superseded by the HTTP-only revision) passed in a read-only,
+  non-root, network-disabled ephemeral container without exposed host ports.
+- Added environment profile/model imports and environment-first credentials,
+  session invalidation on administrator credential changes and explicit fresh-
+  router SSH jobs. Auth/CSRF, duplicate requests, /30 overlap and refusal of
+  wrong primary/OS/existing installation are covered by the regression suite.
+- New SSH onboarding has not been executed on an actual second OVH VPS. It
+  requires an authenticated pinned host, fresh Debian 13, a verified OVH service,
+  /30 and pfSense peer public key. It installs only the remote router; first-time
+  home pfSense/PVE tunnel/VLAN/bridge configuration remains operator work.
+- No management VM deployment, purchase or production network change.
+
+Final revision regression: all 59 tests passed under Linux without networking.
+Public export audited against seven actual local secrets and personal network
+identifiers: no matches; 51 archive entries, including the root workflow.
+
+## HTTP-only revision
+
+Gunicorn and built-in TLS/certificate configuration removed. Waitress 3.0.2 is
+the single HTTP-only server on port 8080. Public HTTPS is terminated externally
+by Cloudflare Tunnel/Access or Nginx Proxy Manager; PUBLIC_URL still controls
+Secure cookies and origin checks. Optional TRUSTED_PROXY trusts one exact proxy
+address for one X-Forwarded-For hop; wildcard trust is not enabled.
+
+Validated: all 59 Linux tests passed with the Waitress image. Read-only isolated
+HTTP startup/health passed; login behind a public HTTPS URL sets Secure/HttpOnly
+cookies. Untrusted X-Forwarded-For is ignored; the explicitly trusted proxy
+correctly separates client login rate limits. No host ports or deployment used.
+
+## Public repository simplification
+
+Distribution now uses the repository root as Docker context. Pipeline reduced
+to checkout/login/build/push with the single image tag latest, no Python matrix
+and no pinned action revisions. PRs build without login/push. The earlier matrix
+workflow description is superseded; local test results remain separate from CI.

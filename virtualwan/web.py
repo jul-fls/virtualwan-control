@@ -20,18 +20,31 @@ def create_app(test_config=None):
     demo=app.config.get('DEMO',os.environ.get('VWAN_DEMO','false').lower()=='true')
     password=app.config.get('ADMIN_PASSWORD',os.environ.get('VWAN_ADMIN_PASSWORD',''))
     if len(password)<12 or password.startswith('REPLACE_'):raise ValueError('VWAN_ADMIN_PASSWORD doit être personnalisé et contenir au moins 12 caractères.')
-    username=os.environ.get('VWAN_ADMIN_USER','admin');hashed=generate_password_hash(password)
+    username=os.environ.get('VWAN_ADMIN_USER','admin')
     store=Store(app.config.get('DATA_DIR',os.environ.get('VWAN_DATA_DIR','data')))
     with store.tx() as db:
+        previous=db.execute("SELECT value FROM settings WHERE name='admin_auth'").fetchone()
+        prior=json.loads(previous['value']) if previous else None
+        if prior and prior['username']==username and check_password_hash(prior['hash'],password):
+            hashed=prior['hash']
+        else:
+            hashed=generate_password_hash(password)
+            db.execute('DELETE FROM sessions')
+            db.execute("INSERT OR REPLACE INTO settings VALUES('admin_auth',?)",(json.dumps({'username':username,'hash':hashed}),))
         current=db.execute("SELECT value FROM settings WHERE name='mode'").fetchone()
         mode='demo' if demo else 'live'
         if current and current['value']!=mode:raise ValueError('Utiliser un volume distinct pour les modes démo et réel.')
         db.execute("INSERT OR REPLACE INTO settings VALUES('mode',?)",(mode,))
     store.redactions.add(password)
     control=Control(store,demo,os.environ.get('VWAN_ENABLE_PURCHASES')=='true',os.environ.get('VWAN_ENABLE_PROVISIONING')=='true',app.config.get('PROVIDER_FACTORY'))
+    from .environment import apply_environment
+    apply_environment(control)
     app.extensions.update(store=store,control=control)
     url=os.environ.get('VWAN_PUBLIC_URL','http://localhost:8080').rstrip('/')
-    public=urlparse(url);allowed={public.hostname,'localhost','127.0.0.1'}
+    public=urlparse(url)
+    if public.scheme not in ('http','https') or not public.hostname or public.username or public.password or public.query or public.fragment or public.path not in ('','/'):
+        raise ValueError('VWAN_PUBLIC_URL doit être une URL HTTP(S) sans chemin ni identifiants.')
+    allowed={public.hostname,'localhost','127.0.0.1'}
     secure=public.scheme=='https';attempts=defaultdict(list)
     def session_id():return hashlib.sha256(request.cookies.get('vwan_session','').encode()).hexdigest()
     def origin_check():
@@ -132,6 +145,8 @@ def create_app(test_config=None):
     def sync(key):store.document('profiles',key);return jsonify(job_id=store.job('sync',{'profile_id':key})),202
     @app.post('/api/profiles/<key>/inspect')
     def inspect(key):store.document('profiles',key);return jsonify(job_id=store.job('inspect',{'profile_id':key})),202
+    @app.post('/api/profiles/<key>/setup-router')
+    def setup_router(key):return jsonify(job_id=control.request_router_setup(key,request.get_json())),202
     @app.post('/api/deployments')
     def deploy():return jsonify(job_id=control.request_deploy(request.get_json())),202
     @app.put('/api/secrets/<name>')

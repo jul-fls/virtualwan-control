@@ -40,11 +40,70 @@ def register_isolation(p, q, vmid, mac):
         run('qm','set',vmid,'--hookscript',p['snippet_storage']+':snippets/virtualwan-isolation-hook.pl')
 
 
+def router_bootstrap(q):
+    """Fresh Debian router only; never overwrites an existing installation."""
+    import base64
+    import importlib.util
+    c=q['router'];primary=str(ipaddress.IPv4Address(c['primary_ip']))
+    route=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
+    if route.get('prefsrc')!=primary:raise ValueError('Primary source mismatch')
+    if c.get('wan_interface') and c['wan_interface']!=route['dev']:raise ValueError('Configured WAN differs from actual route')
+    c['wan_interface']=route['dev']
+    release=Path('/etc/os-release').read_text()
+    if not re.search(r'^ID=\"?debian\"?$',release,re.M) or not re.search(r'^VERSION_ID=\"?13\"?$',release,re.M):
+        raise ValueError('Automatic onboarding currently supports fresh Debian 13 only')
+    target=Path('/etc/virtualwan');binary=Path('/usr/local/sbin/virtualwan')
+    if target.exists() or binary.exists() or Path('/etc/wireguard/wg-vwan.conf').exists() or Path('/etc/systemd/system/virtualwan.service').exists():
+        raise ValueError('Existing installation: inspect/recover it manually; onboarding is not an upgrade')
+    source=base64.b64decode(q['source_base64'],validate=True)
+    if hashlib.sha256(source).hexdigest()!=q['source_sha256']:raise ValueError('Installer digest mismatch')
+    with tempfile.TemporaryDirectory(prefix='virtualwan-validate-') as temp:
+        script=Path(temp)/'router.py';script.write_bytes(source)
+        spec=importlib.util.spec_from_file_location('vwan_router',script);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        config=Path(temp)/'config.json';config.write_text(json.dumps(c));module.load(config)
+    # Check interface ownership BEFORE package or network changes.
+    if subprocess.run(['ip','link','show','wg-vwan'],capture_output=True).returncode==0:
+        raise ValueError('Unmanaged wg-vwan exists')
+    import shutil
+    if shutil.which('nft') and subprocess.run(['nft','list','table','inet','virtualwan'],capture_output=True).returncode==0:
+        raise ValueError('Unmanaged nft table exists')
+    audit('router.packages.begin')
+    env={**os.environ,'DEBIAN_FRONTEND':'noninteractive'}
+    for argv in (['apt-get','update'],['apt-get','install','-y','--no-install-recommends','wireguard-tools','nftables']):
+        result=subprocess.run(argv,env=env,capture_output=True,text=True,timeout=180)
+        audit('router.packages.command',argv=argv,exit_code=result.returncode)
+        if result.returncode:raise RuntimeError('Router package installation failed')
+    target.mkdir(mode=0o700);binary.write_bytes(source);binary.chmod(0o700)
+    config=target/'virtualwan.json';config.write_text(json.dumps(c,indent=2));config.chmod(0o600)
+    run(str(binary),'validate')
+    # Leave this rollback timer armed until the controller reconnects successfully.
+    run('systemd-run','--unit=virtualwan-bootstrap-rollback','--on-active=300s',str(binary),'rollback')
+    try:
+        run(str(binary),'apply')
+        current=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
+        if current.get('dev')!=route['dev'] or current.get('prefsrc')!=primary:raise ValueError('Management route changed')
+        key=run('wg','show','wg-vwan','public-key').strip()
+        emit({'public_key':key,'wan_interface':route['dev'],'primary_ip':primary,'rollback_armed':True,'home_network_configured':False})
+    except Exception:
+        # Exact existing router rollback restores only resources owned by this tool.
+        subprocess.run([str(binary),'rollback'],capture_output=True)
+        raise
+
+
 def main():
     q = json.load(sys.stdin)
     action = q['action']
     p = q.get('pve', {})
-    if action == 'vps_inspect':
+    if action == 'router_bootstrap':
+        router_bootstrap(q)
+    elif action == 'router_bootstrap_finalize':
+        c=json.loads(Path('/etc/virtualwan/virtualwan.json').read_text())
+        route=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
+        if c['primary_ip']!=q['primary_ip'] or route.get('prefsrc')!=q['primary_ip'] or route.get('dev')!=c['wan_interface']:
+            raise ValueError('Post-reconnect route verification failed; rollback timer remains armed')
+        run('systemctl','stop','virtualwan-bootstrap-rollback.timer')
+        emit({'reconnected':True,'primary_egress_verified':True})
+    elif action == 'vps_inspect':
         c = json.loads(Path(q['path']).read_text())
         if c['primary_ip'] != q['primary_ip']:
             raise ValueError('VPS primary IP mismatch')

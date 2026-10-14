@@ -310,6 +310,72 @@ class Control:
         self.store.event(key,'purchase.delivery.reconciled',state=state,delivery=delivery)
         return {'state':state,'purchase':purchase}
 
+    def request_router_setup(self,key,body):
+        p=self.store.document('profiles',key)
+        if not self.demo and not self.allow_provision:raise domain.Conflict('Installation désactivée par VWAN_ENABLE_PROVISIONING.')
+        if body.get('confirmation')!='CONFIGURER '+key[:8]:raise ValueError('Saisir la phrase CONFIGURER affichée.')
+        cfg=p['config']
+        if p['ready']:raise domain.Conflict('Installation réservée à un routeur neuf, pas à une mise à jour.')
+        if self.store.rows('SELECT id FROM deployments WHERE profile_id=?',(key,)):raise domain.Conflict('Ce routeur possède déjà des VM.')
+        domain.public_ip(cfg['vps'].get('primary_ip','')) if not self.demo else None
+        if not cfg['ovh'].get('expected_service'):raise ValueError('Service OVH livré requis.')
+        if cfg['vps'].get('config_path')!='/etc/virtualwan/virtualwan.json':raise ValueError('Le bootstrap utilise /etc/virtualwan/virtualwan.json.')
+        import base64,ipaddress
+        router=cfg.get('router',{})
+        try:
+            tunnel=ipaddress.IPv4Interface(router['tunnel_address']);peer=ipaddress.IPv4Address(router['peer_address'])
+            if tunnel.network.prefixlen!=30 or peer not in tunnel.network or peer==tunnel.ip or peer in (tunnel.network.network_address,tunnel.network.broadcast_address):raise ValueError()
+            if len(base64.b64decode(router['peer_public_key'],validate=True))!=32:raise ValueError()
+        except (KeyError,ValueError,TypeError):raise ValueError('Renseigner un /30 dédié, son peer et la clé publique du nouveau tunnel pfSense.')
+        for other in self.store.rows('SELECT id FROM profiles WHERE id!=?',(key,)):
+            address=self.store.document('profiles',other['id'])['config'].get('router',{}).get('tunnel_address')
+            if address and tunnel.network.overlaps(ipaddress.IPv4Interface(address).network):raise domain.Conflict('Le tunnel chevauche celui d’un autre routeur.')
+        with self.store.tx() as db:
+            for row in db.execute("SELECT payload FROM jobs WHERE kind='router_setup' AND state IN ('queued','running','interrupted')"):
+                if json.loads(row['payload']).get('profile_id')==key:raise domain.Conflict('Installation déjà en cours ou interrompue ; consulter le journal avant toute reprise.')
+            job=self.store.job('router_setup',{'profile_id':key,'revision':p['revision'],'simulated':self.demo},db)
+        self.store.event(job,'router.setup.requested',profile_id=key,service=cfg['ovh']['expected_service'],primary_ip=cfg['vps']['primary_ip'])
+        return job
+
+    def run_router_setup(self,key,payload):
+        p=self.store.document('profiles',payload['profile_id'])
+        if p['revision']!=payload['revision'] or self.demo!=payload['simulated']:raise domain.Conflict('Profil ou mode modifié après demande.')
+        if self.demo:
+            result={'simulated':True,'home_network_configured':False,'reconnected':True,'public_key':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='}
+        else:
+            if not self.allow_provision:raise domain.Conflict('Installation réelle désactivée.')
+            # Verify the primary is actually attached to the specified OVH service.
+            from urllib.parse import quote
+            actual=self.provider(p,key).call('GET','/vps/'+quote(p['config']['ovh']['expected_service'],safe='')+'/ips')
+            if p['config']['vps']['primary_ip'] not in actual:raise domain.Conflict('IP primaire absente du service OVH déclaré.')
+            cfg=deepcopy(p['config']);run=self.store.root/'runs'/key;run.mkdir(parents=True,exist_ok=True)
+            cfg['log_directory']=str(run/'router');cfg['backup_key_env']='VWAN_BACKUP_KEY'
+            cfg['vps']['known_hosts']=str(self.store.root/'ssh-known-hosts')
+            if cfg['vps'].get('private_key'):
+                private=(self.store.root/cfg['vps']['private_key']).resolve()
+                if not private.is_relative_to(self.store.root):raise ValueError('Clé SSH hors data.')
+                cfg['vps']['private_key']=str(private)
+            cfg['router_setup']={**cfg['router'],'primary_ip':cfg['vps']['primary_ip'],'wireguard_interface':'wg-vwan',
+                                 'additional_ips':[r['ip'] for r in self.store.rows('SELECT ip FROM ip_pool WHERE profile_id=?',(p['id'],))]}
+            # Keep only fields accepted by the router installer.
+            cfg['router_setup']={k:cfg['router_setup'][k] for k in ('primary_ip','wan_interface','wireguard_interface','listen_port','mtu','tunnel_address','peer_address','peer_public_key','additional_ips')}
+            env=os.environ.copy()
+            for section in cfg.values():
+                if isinstance(section,dict):
+                    for name,value in section.items():
+                        if name.endswith('_env') and value:
+                            credential=self.store.secret_get(value)
+                            if credential:env[value]=credential
+            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip()
+            path=run/'router-setup.json';path.write_text(json.dumps(cfg));os.chmod(path,0o600)
+            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.router_setup',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            for line in proc.stdout:self.store.event(key,'router.setup.progress',message=line.strip())
+            if proc.wait():raise RuntimeError('Installation interrompue ; vérifier le journal et le rollback avant une nouvelle action.')
+            result=json.loads(path.with_suffix('.result.json').read_text())
+        # Network at home must be verified separately; never mark it ready by SSH success.
+        self.store.event(key,'router.setup.complete',**result)
+        return result
+
     def run_deploy(self,key,payload):
         if bool(payload.get('simulated'))!=self.demo:raise domain.Conflict('Mode du job différent de celui du serveur ; ne pas rejouer une simulation en production.')
         cfg=deepcopy(payload['config']);ip=cfg['public_ip'];run=self.store.root/'runs'/key;run.mkdir(parents=True,exist_ok=True)
@@ -369,6 +435,7 @@ class Control:
         key=row['id'];payload=json.loads(row['payload']);self.store.event(key,'job.started',kind=row['kind'])
         try:
             if row['kind']=='deploy':result=self.run_deploy(key,payload)
+            elif row['kind']=='router_setup':result=self.run_router_setup(key,payload)
             elif row['kind']=='sync':result=self.sync(payload['profile_id'],key)
             elif row['kind']=='inspect':result=self.inspect_clients(payload['profile_id'],key)
             elif row['kind']=='delivery':result=self.follow_delivery(payload['purchase_id'],key)
