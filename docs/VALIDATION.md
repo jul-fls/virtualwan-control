@@ -197,3 +197,14 @@ user's retry on the target firewall. No production changes were made here.
 
 Sources: [pfSense CSRF handler](https://raw.githubusercontent.com/pfsense/pfsense/master/src/usr/local/www/csrf/csrf-magic.php)
 and [native route deletion](https://raw.githubusercontent.com/pfsense/pfsense/master/src/usr/local/www/system_routes.php).
+
+
+### Authentication regression correction
+
+CSRF parsing permits the login form only when PfSense.login explicitly requests
+it. Subsequent authenticated forms still reject a returned login page. Five
+additional fixtures exercise the login token, a full GET/POST login followed by
+backup-page verification, rejected credentials and an expired session before a
+native delete. The earlier CSRF fixture coverage omitted the actual login path;
+this regression is now covered. Validation remains local without production
+firewall access.

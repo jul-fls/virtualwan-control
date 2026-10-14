@@ -31,10 +31,10 @@ class PinnedTLSAdapter(HTTPAdapter):
         conn.ca_cert_dir = None
 
 
-def csrf_token(soup,context='page pfSense'):
+def csrf_token(soup,context='page pfSense',allow_login=False):
     # List pages may have no POST form: csrf-magic exports the same token for
     # usepost links as an inline JS string. Read that literal without executing JS.
-    if soup.find('input',attrs={'name':'usernamefld'}) and soup.find('input',attrs={'name':'passwordfld'}):
+    if not allow_login and soup.find('input',attrs={'name':'usernamefld'}) and soup.find('input',attrs={'name':'passwordfld'}):
         raise ValueError('Session pfSense expirée ou authentification refusée sur '+context)
     field=soup.find('input',attrs={'name':'__csrf_magic'})
     if field and field.get('value'):return field['value']
@@ -45,7 +45,7 @@ def csrf_token(soup,context='page pfSense'):
     raise ValueError('Jeton CSRF pfSense absent sur '+context+' (champ HTML et variable csrfMagicToken). Aucune requête de modification envoyée.')
 
 
-def fields(html, required):
+def fields(html, required,allow_login=False):
     soup = BeautifulSoup(html, 'html.parser')
     for form in soup.find_all('form'):
         names = {x.get('name') for x in form.select('[name]')}
@@ -63,7 +63,7 @@ def fields(html, required):
                 data[name] = option.get('value', option.text) if option else ''
             else:
                 data[name] = el.text if el.name == 'textarea' else el.get('value', 'on' if el.get('type') == 'checkbox' else '')
-        data['__csrf_magic'] = csrf_token(soup)
+        data['__csrf_magic'] = csrf_token(soup,allow_login=allow_login)
         return data
     raise ValueError('pfSense form differs from expected fields: ' + ','.join(required))
 
@@ -108,13 +108,13 @@ class PfSense:
 
     def login(self):
         r = self.request('GET', 'index.php')
-        data = fields(r.text, ['usernamefld', 'passwordfld'])
+        data = fields(r.text, ['usernamefld', 'passwordfld'],allow_login=True)
         data.update(usernamefld=self.cfg['username'], passwordfld=self.secret(self.cfg['password_env']), login='Login')
         self.request('POST', 'index.php', data=data)
         r = self.request('GET', 'diag_backup.php')
-        fields(r.text, ['backuparea', 'download'])
         if BeautifulSoup(r.text, 'html.parser').find('input', attrs={'name': 'usernamefld'}):
             raise ValueError('pfSense authentication failed')
+        fields(r.text, ['backuparea', 'download'])
 
     def snapshot(self, label):
         page = self.request('GET', 'diag_backup.php')

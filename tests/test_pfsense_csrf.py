@@ -36,3 +36,27 @@ class CsrfTests(unittest.TestCase):
     def test_form_fields_use_shared_token_parser(self):
         html=PAGE+'<form method="post"><input name="apply" value="Apply"></form>'
         self.assertEqual(fields(html,['apply'])['__csrf_magic'],TOKEN)
+
+    def login_page(self):
+        return PAGE+'<form method="post"><input name="usernamefld"><input name="passwordfld" type="password"></form>'
+    def test_explicit_login_token_allowed(self):
+        self.assertEqual(fields(self.login_page(),['usernamefld','passwordfld'],allow_login=True)['__csrf_magic'],TOKEN)
+    def test_login_exception_not_implicit_for_other_forms(self):
+        with self.assertRaisesRegex(ValueError,'Session pfSense'):
+            fields(self.login_page(),['usernamefld','passwordfld'])
+    def test_complete_login_uses_csrf_and_verifies_backup_access(self):
+        from unittest.mock import call
+        pf=PfSense.__new__(PfSense);pf.cfg={'username':'test-admin','password_env':'TEST_PF_PASSWORD'};pf.secret=Mock(return_value='test-only-password')
+        backup=PAGE+'<form method="post"><input name="backuparea"><input name="download"></form>'
+        pf.request=Mock(side_effect=[Mock(text=self.login_page()),Mock(text='<html>Logged in</html>'),Mock(text=backup)])
+        pf.login()
+        self.assertEqual(pf.request.call_args_list[1],call('POST','index.php',data={'usernamefld':'test-admin','passwordfld':'test-only-password','__csrf_magic':TOKEN,'login':'Login'}))
+        self.assertEqual(pf.request.call_args_list[2],call('GET','diag_backup.php'))
+    def test_rejected_login_is_not_accepted(self):
+        pf=PfSense.__new__(PfSense);pf.cfg={'username':'test-admin','password_env':'TEST_PF_PASSWORD'};pf.secret=Mock(return_value='test-only-password')
+        pf.request=Mock(side_effect=[Mock(text=self.login_page()),Mock(text=self.login_page()),Mock(text=self.login_page())])
+        with self.assertRaises(ValueError):pf.login()
+    def test_expired_session_cannot_send_delete(self):
+        pf=PfSense.__new__(PfSense);pf.request=Mock(return_value=Mock(text=self.login_page()))
+        with self.assertRaisesRegex(ValueError,'Session pfSense'):pf.native_post('system_routes.php',{'act':'del','id':'2'})
+        self.assertEqual(pf.request.call_count,1)
