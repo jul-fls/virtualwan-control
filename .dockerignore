@@ -1,0 +1,12 @@
+data
+.env
+.env.*
+.git
+dist
+__pycache__
+**/__pycache__
+**/*.pyc
+*.key
+*.pem
+*.private
+tests

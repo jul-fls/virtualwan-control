@@ -1,0 +1,4 @@
+{$VWAN_CONTROL_HOST} {
+    tls internal
+    reverse_proxy control:8080
+}

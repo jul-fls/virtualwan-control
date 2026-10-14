@@ -1,0 +1,13 @@
+data/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+*.key
+*.pem
+*.private
+*.sqlite*
+*.secrets.json
+dist/

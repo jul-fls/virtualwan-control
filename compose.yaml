@@ -1,0 +1,18 @@
+services:
+  control:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    ports:
+      - "${VWAN_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    volumes:
+      - control-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 45s
+volumes:
+  control-data:

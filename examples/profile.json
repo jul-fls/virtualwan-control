@@ -1,0 +1,21 @@
+{
+  "name": "Routeur principal",
+  "provider": "ovh",
+  "capacity": 16,
+  "ready": false,
+  "config": {
+    "domain": "hosting.example.net",
+    "hostname_pattern": "vps-{ipv4_compact}.{domain}",
+    "router": {"wan_interface": "ens3", "listen_port": 51820, "mtu": 1420, "tunnel_address": "10.254.250.1/30", "peer_address": "10.254.250.2", "peer_public_key": null},
+    "backup_key_env": "VWAN_BACKUP_KEY",
+    "cloudflare": {"zone_id": "REPLACE_ZONE_ID", "token_env": "CLOUDFLARE_API_TOKEN", "ttl": 300},
+    "ovh": {"endpoint": "https://eu.api.ovh.com/1.0", "subsidiary": "FR", "expected_service": null, "ip_block": null, "application_key_env": "OVH_APPLICATION_KEY", "application_secret_env": "OVH_APPLICATION_SECRET", "consumer_key_env": "OVH_CONSUMER_KEY"},
+    "vps": {"host": "192.0.2.10", "port": 22, "username": "debian", "password_env": "ROUTER_SSH_PASSWORD", "private_key": null, "key_passphrase_env": null, "known_hosts": "/data/ssh-known-hosts", "sudo": true, "sudo_password_env": "ROUTER_SSH_PASSWORD", "primary_ip": "192.0.2.10", "config_path": "/etc/virtualwan/virtualwan.json"},
+    "pve": {"host": "192.168.1.10", "port": 22, "username": "root", "password_env": "PVE_SSH_PASSWORD", "private_key": null, "key_passphrase_env": null, "known_hosts": "/data/ssh-known-hosts", "sudo": false, "node": "pve-node", "template": 9001, "vmid": null, "vmid_start": 120, "bridge": "vmbr12", "disk_storage": "local-lvm", "snippet_storage": "snippets", "snippet_directory": "/mnt/pve/snippets/snippets", "cores": 2, "memory_mb": 2048, "disk_gb": 32},
+    "guest": {"username": "debian", "ssh_auth": "key", "ssh_public_key_file": "", "password_env": "GUEST_SSH_PASSWORD", "interface": "ens18", "gateway": "10.254.251.1", "mtu": 1420, "dns": ["1.1.1.1", "9.9.9.9"]},
+    "pfsense": {"url": "https://firewall.example.net", "username": "admin", "password_env": "PFSENSE_PASSWORD", "ca_bundle": null, "certificate_sha256": null, "connect_ip": null, "public_interface": "opt_public", "wireguard_interface": "opt_wireguard", "public_alias": "VWAN_PUBLIC_IPS", "wireguard_gateway": "WG_PUBLIC_GW", "next_hop": null, "next_hop_network": "10.254.251.0/24"},
+    "start_vm": true,
+    "reboot_test": true,
+    "require_client_isolation": true
+  }
+}

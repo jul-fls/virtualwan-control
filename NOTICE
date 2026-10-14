@@ -1,0 +1,12 @@
+Virtualwan Control
+Copyright 2026 Virtualwan contributors.
+
+Licensed under the Apache License, Version 2.0.
+Provider names (OVHcloud, Cloudflare, Proxmox, pfSense) identify integrations;
+this project is independent and is not endorsed by those providers.
+
+The provisioning adapters and network tools originated in the Virtualwan
+CLI project and have been modified for generic configuration, a private
+control panel, procurement approvals and multiple routing segments.
+Third-party dependencies retain their own licenses; they are installed from
+their distributions and are not relicensed by this NOTICE.
