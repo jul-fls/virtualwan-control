@@ -58,6 +58,35 @@ class Control:
         self.store.event(key,'profile.saved',profile=self.store.clean(item),revision=revision)
         return key
 
+    def delete_profile(self,key,confirmation):
+        """Forget an unused local draft; never decommission remote resources."""
+        if confirmation!='SUPPRIMER':raise ValueError('Saisir SUPPRIMER pour confirmer.')
+        with self.store.tx() as db:
+            p=self.store.document('profiles',key)
+            if p['ready']:raise domain.Conflict('Suppression réservée à un profil jamais déployé et non marqué prêt.')
+            declared=json.loads(os.environ.get('VWAN_PROFILES_JSON') or '[]')
+            from .environment import OVERRIDES
+            overrides=any(os.environ.get(name,'').strip() for name in OVERRIDES)
+            target=os.environ.get('VWAN_PROFILE_ID','').strip()
+            if any(item.get('id')==key for item in declared) or (overrides and (target==key or not target)):
+                raise domain.Conflict('Retirer d’abord ce profil de VWAN_PROFILES_JSON et ses variables de connexion/IPv6 ciblées, puis redémarrer l’application avant de le supprimer.')
+            if db.execute('SELECT 1 FROM deployments WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des VM clientes.')
+            if db.execute('SELECT 1 FROM ip_pool WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des IP en inventaire.')
+            for row in db.execute('SELECT state,data FROM purchases WHERE profile_id=?',(key,)):
+                if row['state'] not in ('cancelled','expired','failed'):
+                    raise domain.Conflict('Un devis, achat ou service livré dépend encore de ce profil. Annuler les devis non commandés ; une commande fournisseur ne doit pas être oubliée.')
+            for row in db.execute('SELECT kind,state,payload FROM jobs'):
+                payload=json.loads(row['payload'])
+                if payload.get('profile_id')!=key:continue
+                if row['state'] in ('queued','running','interrupted'):
+                    raise domain.Conflict('Une opération est encore en attente, active ou interrompue sur ce profil.')
+                if row['kind'] not in ('sync','inspect','quote','delivery') and not payload.get('simulated'):
+                    raise domain.Conflict('Une configuration distante a pu être appliquée. Ce profil ne peut pas être supprimé comme un simple test non déployé.')
+            self.store.event(key,'profile.deleted',name=p['name'],profile_id=key,remote_changes=False)
+            db.execute('DELETE FROM profiles WHERE id=?',(key,))
+            db.execute('DELETE FROM settings WHERE name=?',('environment:profile:'+key,))
+        return {'ok':True,'remote_changes':False}
+
     def clone_profile(self,key,name,network,gateway):
         old=self.store.document('profiles',key);item={k:deepcopy(old[k]) for k in ('name','provider','capacity','ready','config')}
         item.update(name=name,ready=False)

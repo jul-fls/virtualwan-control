@@ -104,7 +104,10 @@ class Store:
 
     def job(self,kind,payload,db=None):
         job=ident();now=time.time()
-        def write(connection):connection.execute('INSERT INTO jobs(id,kind,state,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',(job,kind,'queued',json.dumps(payload),now,now))
+        def write(connection):
+            # Do not enqueue work against a draft deleted by another request.
+            if payload.get('profile_id') and not connection.execute('SELECT 1 FROM profiles WHERE id=?',(payload['profile_id'],)).fetchone():raise KeyError('Profil supprimé.')
+            connection.execute('INSERT INTO jobs(id,kind,state,payload,created_at,updated_at) VALUES(?,?,?,?,?,?)',(job,kind,'queued',json.dumps(payload),now,now))
         if db is not None:write(db)
         else:
             with self.tx() as connection:write(connection)

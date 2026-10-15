@@ -481,3 +481,16 @@ cliente. Cloud-init, isolation PVE, règles HTTPS pfSense, AAAA et nettoyage
 libération/suppression sont pris en charge. Les profils IPv4 seuls restent valides.
 Configuration en variables d’environnement, migration des VM existantes et
 limites : [docs/IPV6.md](docs/IPV6.md).
+
+### Retirer un profil routeur de test
+
+Dans **Routeurs**, utiliser **Supprimer le profil**, puis saisir `SUPPRIMER`.
+Cette action retire uniquement un profil non marqué prêt, sans VM cliente, IP
+inventoriée, achat engagé ou opération en cours. Une installation distante réelle,
+même échouée, empêche de le traiter comme un simple brouillon. Les journaux,
+l’historique des devis clos et les secrets partagés sont conservés ; aucun service
+OVH n’est résilié. Un devis non commandé doit d’abord être annulé.
+
+Si le profil est déclaré dans `VWAN_PROFILES_JSON`, le retirer de cette variable
+(et retirer les variables de connexion/IPv6 qui le ciblent), puis redémarrer
+l’application avant sa suppression dans l’UI, pour éviter sa recréation.

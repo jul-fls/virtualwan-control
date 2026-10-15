@@ -31,6 +31,16 @@ fs.mkdirSync(out,{recursive:true});
       assert((await page.locator('#page-title').textContent()).length>0);
       await page.screenshot({path:path.join(out,section+'.png'),fullPage:true});
     }
+    await page.locator('nav a[data-page=clients]').click();
+    assert((await page.locator('thead').textContent()).includes('IP publiques'));
+    const draft=await page.evaluate(async id=>api('profiles/'+id+'/clone','POST',{name:'Disposable router test',network:'10.254.249.0/24',gateway:'10.254.249.1'}),s.profiles[0].id);
+    await page.locator('#refresh').click();
+    await page.locator('nav a[data-page=routers]').click();
+    await page.locator('[data-action=delete-profile][data-id="'+draft.id+'"]').click();
+    await page.locator('#action-form input[name=confirmation]').fill('SUPPRIMER');
+    await page.locator('#action-form button.primary').click();
+    await page.waitForFunction(()=>!document.querySelector('#modal').open);
+    await page.locator('[data-action=profile][data-id="'+draft.id+'"]').waitFor({state:'detached'});
     await page.locator('nav a[data-page=ips]').click();
     await page.locator('[data-action=use-ip]').first().click();
     await page.locator('#action-form textarea[name=public_key]').fill('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test');

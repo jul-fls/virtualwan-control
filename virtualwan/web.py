@@ -132,6 +132,8 @@ def create_app(test_config=None):
     def profile_create():return jsonify(id=control.add_profile(request.get_json())),201
     @app.put('/api/profiles/<key>')
     def profile_update(key):store.document('profiles',key);return jsonify(id=control.add_profile(request.get_json(),key))
+    @app.delete('/api/profiles/<key>')
+    def profile_delete(key):return jsonify(**control.delete_profile(key,request.get_json().get('confirmation')))
     @app.post('/api/profiles/<key>/clone')
     def profile_clone(key):
         body=request.get_json();return jsonify(id=control.clone_profile(key,body['name'],body['network'],body['gateway'])),201

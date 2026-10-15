@@ -300,3 +300,14 @@ Source: https://support.us.ovhcloud.com/hc/en-us/articles/360011668000-Purchasin
 - The earlier pilot validated the same IPv6 bridge rules, spoofing isolation,
   inbound/outbound connectivity and persistent guest configuration. Full live
   provisioning/removal through this new app version remains a rollout check.
+
+## Public IP labels and unused router removal — 2026-10-15
+
+- Full Linux suite: **206 tests passed**. Eleven new cases cover local removal,
+  confirmation, authentication/CSRF, dependent VM/IP/quotes/jobs, completed real
+  setup attempts, environment declarations, audit/history and shared secrets.
+- Job creation refuses a profile removed by another request.
+- Local headless Chrome: all eight pages pass, including the `IP publiques`
+  header and creation/removal of an unused cloned router through the UI.
+- Docker build, JavaScript syntax/catalogue checks and git diff checks pass.
+- No production resources or supplier orders were changed.
