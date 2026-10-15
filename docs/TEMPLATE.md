@@ -70,6 +70,8 @@ through SSH if needed. The console can still access boot/rescue screens.
 
 An already deployed serial-only VM is not silently stopped or reconfigured by
 upgrading the controller. From its own console/SSH, ensure `getty@tty1` is enabled
-and GRUB supports tty0, then stop the VM, select Prepare graphical console in
-the client portal, and start it again. This removes serial0 and selects std VGA.
+and GRUB supports tty0, then select Prepare graphical console in the client
+portal. After confirmation, the controller requests graceful shutdown, waits
+for the VM to stop, removes serial0, selects std VGA and starts the VM. The
+background operation shows progress and never forces shutdown on timeout.
 Test this on a disposable clone before converting a general-purpose template.

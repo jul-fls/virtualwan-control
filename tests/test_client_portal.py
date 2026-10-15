@@ -138,10 +138,51 @@ class ClientPortalTests(unittest.TestCase):
                 db.execute("UPDATE deployments SET ip=NULL WHERE id='old'")
                 db.execute("DELETE FROM deployments WHERE id='old'")
                 self.assertIsNone(db.execute('SELECT * FROM client_vms').fetchone())
-    def test_graphical_change_requires_stopped_vm_and_removes_serial_only(self):
-        pve=ClientPVE(self.store,{},{});pve.config={'serial0':'socket','vga':'serial0','net0':'untouched','digest':'digest'}
-        with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api') as api:
-            pve.graphical();api.assert_called_once_with('set','/config',vga='std',digest='digest',delete='serial0')
+    def test_graphical_waits_for_shutdown_before_config_and_starts_after(self):
+        from unittest.mock import MagicMock,call
+        pve=ClientPVE(self.store,{},{});pve.config={'serial0':'socket','vga':'serial0','digest':'digest'}
+        order=MagicMock()
+        with patch.object(pve,'status',side_effect=[{'status':'running'},{'status':'stopped'}]),patch.object(pve,'check_identity'),patch.object(pve,'api',side_effect=['UPID:shutdown',None,{'vga':'std'},'UPID:start']) as api,patch.object(pve,'wait_task') as task,patch.object(pve,'wait_power') as power:
+            order.attach_mock(api,'api');order.attach_mock(task,'task');order.attach_mock(power,'power')
+            result=pve.graphical()
+        self.assertTrue(result['restarted'])
+        names=[c[0] for c in order.mock_calls]
+        self.assertEqual(names,['api','task','power','api','api','api','task','power'])
+        api.assert_any_call('create','/status/shutdown',timeout=120,forceStop=0)
+        api.assert_any_call('set','/config',vga='std',digest='digest',delete='serial0')
+    def test_graphical_shutdown_timeout_never_changes_config_or_force_stops(self):
+        from virtualwan.adapters.client_pve import GraphicalPreparationError
+        pve=ClientPVE(self.store,{},{});pve.config={'digest':'digest'}
+        with patch.object(pve,'status',return_value={'status':'running'}),patch.object(pve,'api',return_value='UPID:shutdown') as api,patch.object(pve,'wait_task',side_effect=GraphicalPreparationError('Arrêt non confirmé')):
+            with self.assertRaisesRegex(GraphicalPreparationError,'Arrêt non confirmé'):pve.graphical()
+        api.assert_called_once_with('create','/status/shutdown',timeout=120,forceStop=0)
+    def test_graphical_configuration_failure_restores_running_guest(self):
+        from virtualwan.adapters.client_pve import GraphicalPreparationError
+        pve=ClientPVE(self.store,{},{});pve.config={'digest':'digest'}
+        with patch.object(pve,'status',side_effect=[{'status':'running'},{'status':'stopped'},{'status':'stopped'}]),patch.object(pve,'check_identity'),patch.object(pve,'api',side_effect=['UPID:shutdown',ValueError('private detail'),'UPID:start']) as api,patch.object(pve,'wait_task'),patch.object(pve,'wait_power'):
+            with self.assertRaisesRegex(GraphicalPreparationError,'remis en marche'):pve.graphical()
+        self.assertEqual(api.call_args.args,('create','/status/start'))
+    def test_graphical_background_job_deduplicates_and_blocks_parallel_power(self):
+        self.login();pending=[];self.app.config['CLIENT_TASK_RUNNER']=pending.append
+        path='/api/portal/vps/'+self.vm+'/graphical'
+        first=self.client.post(path,json={},headers=self.headers);self.assertEqual(first.status_code,202)
+        again=self.client.post(path,json={},headers=self.headers);self.assertEqual(first.json,again.json);self.assertEqual(len(pending),1)
+        self.assertEqual(self.client.post('/api/portal/vps/'+self.vm+'/power',json={'action':'start'},headers=self.headers).status_code,409)
+        pending[0]()
+        status=self.client.get('/api/portal/operations/'+first.json['operation_id'])
+        self.assertEqual(status.json['state'],'succeeded');self.assertEqual(status.json['result']['phase'],'ready')
+    def test_graphical_background_failure_has_actionable_safe_error(self):
+        from unittest.mock import MagicMock
+        from virtualwan.adapters.client_pve import GraphicalPreparationError
+        self.login();self.control.demo=False;self.control.allow_provision=True
+        backend=MagicMock();backend.__enter__.return_value=backend
+        backend.graphical.side_effect=GraphicalPreparationError('Le VPS ne s’est pas arrêté proprement. Réessayez après son arrêt.')
+        self.app.config.update(CLIENT_PVE_FACTORY=lambda *a:backend,CLIENT_TASK_RUNNER=lambda f:f())
+        response=self.client.post('/api/portal/vps/'+self.vm+'/graphical',json={},headers=self.headers)
+        self.assertEqual(response.status_code,202)
+        result=self.client.get('/api/portal/operations/'+response.json['operation_id']).json
+        self.assertEqual(result['state'],'failed');self.assertIn('arrêté proprement',result['result']['error'])
+        self.assertNotIn('infrastructure',result['result']['error'])
     def test_rescue_restore_accepts_proxmox_size_annotation(self):
         pve=ClientPVE(self.store,{},{});pve.config={'ide0':'iso:iso/rescue.iso,media=cdrom,size=1024K','digest':'digest'}
         with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api') as api:

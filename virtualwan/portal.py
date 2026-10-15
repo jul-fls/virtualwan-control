@@ -13,7 +13,7 @@ import requests
 from flask import abort,g,jsonify,request,render_template
 from . import domain
 from .accounts import Accounts,email,password_hash
-from .adapters.client_pve import ClientPVE,validate_rules
+from .adapters.client_pve import ClientPVE,GraphicalPreparationError,validate_rules
 from .store import ident
 
 
@@ -88,6 +88,8 @@ def install_portal(app,store,control,origin):
     @app.get('/client')
     @app.get('/client/')
     def client_index():return render_template('client.html')
+    @app.get('/client/console/<key>')
+    def console_page(key):return render_template('console.html')
     @app.post('/api/portal/login')
     def client_login():
         b=body();throttle(b.get('email'));return login_response(accounts.login(b.get('email'),b.get('password'),b.get('code')))
@@ -106,6 +108,9 @@ def install_portal(app,store,control,origin):
     @app.get('/api/portal/state')
     def client_state():
         clients=[public_vm({**json.loads(r['data']),**{k:v for k,v in r.items() if k!='data'}}) for r in store.rows('SELECT d.*,v.display_name,v.description FROM deployments d JOIN client_vms v ON v.deployment_id=d.id WHERE v.account_id=?',(g.client['account_id'],))]
+        for vm in clients:
+            pending=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND account_id=? AND action='graphical' AND state='running'",(vm['id'],g.client['account_id']))
+            if pending:vm['graphical_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
         return jsonify(account=account_view(),csrf=g.client['csrf'],vps=clients,demo=control.demo,rescue_available=bool(os.environ.get('VWAN_RESCUE_ISO')),operations=store.rows('SELECT id,deployment_id,action,state,created_at FROM client_operations WHERE account_id=? ORDER BY created_at DESC LIMIT 50',(g.client['account_id'],)))
     @app.post('/api/portal/logout')
     def client_logout():
@@ -182,7 +187,7 @@ def install_portal(app,store,control,origin):
             state='succeeded' if result.get('exitstatus')=='OK' else 'failed'
             with store.tx() as db:db.execute('UPDATE client_operations SET state=?,result=? WHERE id=?',(state,json.dumps(result),run))
             if r['state']!=state:store.event(run,'client.task.finished',state=state,exitstatus=result.get('exitstatus'))
-        return jsonify(state=state,result={k:result[k] for k in ('status','exitstatus','simulated') if k in result})
+        return jsonify(state=state,result={k:result[k] for k in ('status','exitstatus','simulated','phase','message','error','reference','configured','restarted') if k in result})
     @app.get('/api/portal/vps/<key>/firewall')
     def get_firewall(key):
         d=owner(key)
@@ -234,11 +239,55 @@ def install_portal(app,store,control,origin):
         return jsonify(ok=True)
     @app.post('/api/portal/vps/<key>/graphical')
     def graphical(key):
-        with operation(key,'graphical') as (d,run):
-            if control.demo:result={'ok':True,'simulated':True}
-            else:
-                with backend(d) as pve:result=pve.graphical()
-        return jsonify(result)
+        d=owner(key);account=g.client['account_id']
+        if not control.demo and not control.allow_provision:raise domain.Conflict('Les opérations sur les VM sont désactivées par l’administrateur.')
+        if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Ce VPS est actuellement indisponible pour cette opération.')
+        with lock_guard:lock=locks.setdefault(key,threading.Lock())
+        with store.tx() as db:
+            existing=db.execute("SELECT id FROM client_operations WHERE deployment_id=? AND account_id=? AND action='graphical' AND state='running'",(key,account)).fetchone()
+            if existing:return jsonify(operation_id=existing['id']),202
+            if db.execute("SELECT count(*) FROM client_operations WHERE action='graphical' AND state='running'").fetchone()[0]>=4:raise domain.Conflict('Plusieurs préparations sont en cours. Réessayez dans quelques instants.')
+            if not lock.acquire(blocking=False):raise domain.Conflict('Une autre opération est en cours sur ce VPS.')
+            run=ident()
+            try:
+                # This transaction also excludes concurrent reassignment/retirement.
+                d=owner(key)
+                if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Ce VPS est actuellement indisponible pour cette opération.')
+                db.execute('INSERT INTO client_operations VALUES(?,?,?,?,?,?,?)',(run,account,key,'graphical','running',json.dumps({'phase':'checking','message':'Préparation de la console en cours…'}),time.time()))
+            except BaseException:lock.release();raise
+        d['_operation_run']=run
+        def progress(phase,message):
+            with store.tx() as db:db.execute('UPDATE client_operations SET result=? WHERE id=?',(json.dumps({'phase':phase,'message':message}),run))
+            store.event(run,'client.graphical.progress',phase=phase,message=message)
+        def prepare():
+            phase='checking'
+            try:
+                store.event(run,'client.graphical.started',account_id=account,deployment_id=key)
+                if control.demo:
+                    for phase,message in [('shutdown','Arrêt propre du VPS en cours…'),('configuring','Configuration VGA…'),('starting','Démarrage du VPS…'),('ready','Console VGA prête. Le VPS est allumé.')]:progress(phase,message)
+                    update_vm(key,power_state='running');result={'ok':True,'configured':True,'restarted':True,'simulated':True}
+                else:
+                    factory=app.config.get('CLIENT_PVE_FACTORY',ClientPVE)
+                    with factory(store,store.document('profiles',d['profile_id']),d) as pve:result=pve.graphical(progress)
+                result.update(phase='ready',message='Console VGA prête. Le VPS est allumé.')
+                with store.tx() as db:db.execute("UPDATE client_operations SET state='succeeded',result=? WHERE id=?",(json.dumps(result),run))
+                store.event(run,'client.graphical.complete')
+            except Exception as error:
+                previous=json.loads(store.one('SELECT result FROM client_operations WHERE id=?',(run,))['result'])
+                message=str(error) if isinstance(error,GraphicalPreparationError) else 'La préparation de la console a été interrompue pendant cette étape. Vous pouvez consulter son état et réessayer.'
+                result={'phase':previous.get('phase','checking'),'message':message,'error':message,'reference':run}
+                with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps(result),run))
+                store.event(run,'client.graphical.failed',phase=result['phase'],error_type=type(error).__name__,error=str(error))
+            finally:lock.release()
+        try:
+            runner=app.config.get('CLIENT_TASK_RUNNER')
+            if runner:runner(prepare)
+            else:threading.Thread(target=prepare,name='vwan-vga-'+run[:8],daemon=True).start()
+        except Exception:
+            lock.release()
+            with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps({'error':'La préparation n’a pas pu démarrer. Réessayez.','phase':'checking'}),run))
+            raise
+        return jsonify(operation_id=run),202
     @app.post('/api/portal/vps/<key>/rescue')
     def rescue(key):
         b=body()

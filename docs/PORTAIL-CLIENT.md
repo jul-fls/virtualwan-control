@@ -96,6 +96,23 @@ vrai. Les listes DNS/préfixes utilisent des virgules, les booléens true/false.
 - **Personnalisation** : nom d’affichage/description propres au client ; le nom
   technique, les IP et l’identité d’isolation ne changent pas.
 
+La console propose le plein écran, un onglet dédié ou une fenêtre séparée avec
+les mêmes contrôles. Ctrl, Alt et Windows sont trois boutons indépendants à
+maintien activable : un clic enfonce, un second relâche. Tab, Échap et
+Ctrl+Alt+Suppr sont envoyés directement. « Relâcher les touches », la fermeture
+et la perte de focus évitent de laisser un modificateur enfoncé.
+
+« Préparer l’affichage graphique » demande confirmation puis exécute en
+arrière-plan : arrêt ACPI propre, attente de la tâche Proxmox **et** de l’état
+arrêté, suppression de serial0/configuration VGA std, vérification et démarrage.
+Le suivi affiche chaque étape ; actualiser permet de retrouver une préparation
+en cours. Les actions concurrentes sur ce VPS sont refusées. Un arrêt qui
+échoue après 120 s ne devient jamais un arrêt forcé. Un échec de conversion
+après arrêt déclenche une tentative de remise en marche si le VPS était allumé.
+Un échec réel affiche une explication de l’étape et une référence de journal,
+sans exposer les accès de management. Un redémarrage du contrôleur marque une
+préparation en cours comme interrompue ; elle n’est pas rejouée automatiquement.
+
 Les nouvelles VM utilisent VGA std/noVNC. Pour les anciennes VM série, lire
 [la procédure du template](TEMPLATE.md). Une mise à jour du contrôleur n’arrête
 aucune VM existante. Les clients SSH par clé peuvent définir eux-mêmes un mot

@@ -352,3 +352,23 @@ rescue media/boot on both nodes, live reverse changes, migration during console,
 and the operator's reverse-proxy WebSocket/TLS path. These remain disposable-VM
 rollout checks listed in docs/PORTAIL-CLIENT.md. The management Docker deployment
 and production databases were not modified from this workstation.
+
+## VGA preparation and console controls — 2026-10-15
+
+- Full offline Linux suite: **237 tests passed**. Regressions check shutdown/task
+  completion ordering before config, restart after config, no forced stop after
+  shutdown timeout, recovery after a config failure, background deduplication,
+  exclusion of parallel power operations and customer-safe stage errors.
+- Headless Chrome customer flow passed again with VGA background preparation,
+  fullscreen inside the modal, authenticated standalone console tab, MFA and
+  passkeys; no JavaScript errors.
+- Separate browser console test verifies individual latched Ctrl/Alt/Windows
+  key-down/up events, Tab/Escape, Ctrl+Alt+Delete with modifier restoration,
+  release button, blur/destroy releases and fullscreen entry/exit. The RFB
+  transport is fake for deterministic key assertions.
+- Docker image builds locally. Browser runs use a read-only, capability-free
+  demo container. No production PVE/VM/management deployment was modified.
+
+Actual guest ACPI shutdown/start, QEMU VGA output and key handling inside a real
+guest remain rollout checks on a disposable VM. The UI/browser and adapter
+sequencing checks above do not substitute for those infrastructure tests.

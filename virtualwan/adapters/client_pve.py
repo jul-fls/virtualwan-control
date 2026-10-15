@@ -4,10 +4,15 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import time
 import paramiko
 from .provision import require_ssh_host_key
 from .. import domain
 from ..store import ident
+
+
+class GraphicalPreparationError(domain.Conflict):
+    """An actionable, customer-safe failure of a specific preparation phase."""
 
 
 class ClientPVE:
@@ -116,13 +121,68 @@ class ClientPVE:
             self.api('set','/config',net0=net,digest=self.config['digest'])
         self.api('set','/firewall/options',enable=enabled,policy_in=body['policy_in'])
         return self.firewall()
-    def graphical(self):
-        if self.status()['status']!='stopped':raise domain.Conflict('Arrêter la VM avant de préparer sa console graphique.')
-        # No guest disk or network change. Guest kernel must also enable tty0.
-        params={'vga':'std','digest':self.config['digest']}
-        if 'serial0' in self.config:params['delete']='serial0'
-        self.api('set','/config',**params)
-        return {'ok':True,'restart_required':True}
+    def wait_task(self,upid,timeout,message):
+        if not isinstance(upid,str) or not upid.startswith('UPID:'):raise GraphicalPreparationError(message)
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            status=self.task_status(upid)
+            if status['status']=='stopped':
+                if status.get('exitstatus')!='OK':raise GraphicalPreparationError(message)
+                return
+            time.sleep(1)
+        raise GraphicalPreparationError(message)
+    def wait_power(self,expected,timeout,message):
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            if self.status()['status']==expected:return
+            time.sleep(1)
+        raise GraphicalPreparationError(message)
+    def graphical(self,progress=lambda phase,message:None):
+        progress('checking','Vérification de l’état du VPS…')
+        current=self.status()['status'];was_running=current=='running';stopped=False;configured=False
+        if current not in ('running','stopped'):raise GraphicalPreparationError('Le VPS est occupé ou suspendu. Reprendre son fonctionnement normal avant de préparer la console.')
+        try:
+            if was_running:
+                progress('shutdown','Arrêt propre du VPS en cours…')
+                task=self.api('create','/status/shutdown',timeout=120,forceStop=0)
+                message='Le VPS ne s’est pas arrêté proprement dans le délai prévu. Aucun arrêt forcé ni changement VGA n’a été effectué. Éteignez-le depuis son système ou utilisez « Forcer l’arrêt », puis relancez la préparation.'
+                self.wait_task(task,135,message);self.wait_power('stopped',15,message)
+            stopped=True
+            progress('configuring','VPS arrêté. Configuration de l’affichage VGA…')
+            # Refresh the node, ownership and config digest after the shutdown task.
+            self.check_identity()
+            if self.status()['status']!='stopped':raise GraphicalPreparationError('Le VPS a été rallumé pendant la préparation. Relancer la préparation sans autre action d’alimentation en parallèle.')
+            params={'vga':'std','digest':self.config['digest']}
+            if 'serial0' in self.config:params['delete']='serial0'
+            self.api('set','/config',**params)
+            actual=self.api('get','/config')
+            if actual.get('vga','').split(',')[0]!='std' or 'serial0' in actual:raise GraphicalPreparationError('La modification VGA n’a pas été confirmée par Proxmox. La configuration précédente doit être vérifiée avant une nouvelle tentative.')
+            configured=True
+            progress('starting','Affichage VGA prêt. Démarrage du VPS…')
+            self.check_identity()
+            task=self.api('create','/status/start')
+            message='L’affichage VGA est configuré, mais Proxmox n’a pas confirmé le démarrage. Utilisez « Démarrer » pour réessayer ; aucune réinstallation n’a été effectuée.'
+            self.wait_task(task,90,message);self.wait_power('running',30,message)
+            progress('ready','Console VGA prête. Le VPS est allumé.')
+            return {'ok':True,'configured':True,'restarted':True}
+        except Exception as error:
+            self.store.event(self.client.get('_operation_run',ident()),'client.graphical.phase.failed',error_type=type(error).__name__,error=str(error))
+            # If configuration failed after we stopped a running guest, restore power
+            # when possible rather than silently leaving it down. Never force-stop.
+            if was_running and stopped and not configured:
+                progress('recovering','Préparation interrompue. Tentative de remise en marche du VPS…')
+                try:
+                    self.check_identity()
+                    if self.status()['status']=='stopped':
+                        task=self.api('create','/status/start');self.wait_task(task,90,'Le redémarrage de secours n’a pas été confirmé.')
+                    self.wait_power('running',15,'Le redémarrage de secours n’a pas été confirmé.')
+                except Exception as recovery:
+                    self.store.event(self.client.get('_operation_run',ident()),'client.graphical.recovery.failed',error=str(recovery))
+                    raise GraphicalPreparationError('La conversion VGA et la remise en marche n’ont pas abouti. Utilisez « Démarrer » ; les détails sont conservés dans le journal de cette opération.') from error
+                raise GraphicalPreparationError('La conversion VGA a échoué ; le VPS a été remis en marche. Vous pouvez relancer la préparation. Les détails techniques sont conservés dans le journal.') from error
+            if isinstance(error,GraphicalPreparationError):raise
+            if configured:raise GraphicalPreparationError('L’affichage VGA est configuré, mais le démarrage n’a pas été confirmé. Vérifiez l’état du VPS et utilisez « Démarrer » si nécessaire.') from error
+            raise GraphicalPreparationError('La préparation VGA a été interrompue avant confirmation de la modification. Les détails sont conservés dans le journal de cette opération.') from error
     def rescue(self,iso,disable=False,saved=None):
         if self.status()['status']!='stopped':raise domain.Conflict('Arrêter la VM avant de changer son démarrage rescue.')
         if disable:
@@ -141,7 +201,7 @@ class ClientPVE:
         self.api('set','/config',ide0=saved['ide0'],boot='order=ide0;scsi0',digest=self.config['digest']);return saved
     def console(self,password):
         if self.status()['status']!='running':raise domain.Conflict('La VM doit être allumée pour ouvrir la console.')
-        if self.config.get('vga','std').split(',')[0] in ('serial0','none'):raise domain.Conflict('Préparer la console graphique depuis la fiche du VPS (VM arrêtée).')
+        if self.config.get('vga','std').split(',')[0] in ('serial0','none'):raise domain.Conflict('Préparer la console graphique depuis la fiche du VPS.')
         args=['env','LC_PVE_TICKET='+password,'qm','vncproxy',str(self.client['vmid'])]
         if self.node!=self.profile['config']['pve']['node']:
             address=self.reg['nodes'][self.node]['address']
