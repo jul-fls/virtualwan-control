@@ -264,3 +264,24 @@ Final catalogue validation: all 165 Linux tests pass. The eight-page localhost
 browser test also passes, including nonzero monthly pricing labels and both
 guided quote forms. Docker build and git diff checks pass. No purchase approval
 was sent, and production resources were not provisioned.
+
+
+## Router offer comparison and optional IP fields
+
+Pure JavaScript tests validate monthly/annual normalization, true zero prices,
+missing prices, standard-mode preference, numeric sorting in both directions,
+multiple-disk capacity and combined hardware filters. Prices and conditions are
+not changed in purchase requests; these helpers only control presentation.
+
+The eight-page localhost demo browser test uses three simulated router sizes to
+verify default price order, RAM order, storage order, combined CPU/RAM/disk filters,
+per-option monthly price labels and annual-equivalent disclosure. It also checks
+the collapsed optional IP fields and their explanatory help. The guided quote
+flows still pass, with no JavaScript errors or purchase approval. Docker build
+and JavaScript syntax checks pass. No production resources were changed.
+
+For this VPS-attached /32 use case, the previous real unpaid IP quote accepted
+country and destination without nexthop/nic/contact overrides. The UI groups only
+fields OVH marks optional; required fields remain visible. OVH's Additional IP
+guide identifies nic as the primary account email, not a network interface.
+Source: https://support.us.ovhcloud.com/hc/en-us/articles/360011668000-Purchasing-and-managing-Additional-IPs

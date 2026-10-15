@@ -451,3 +451,24 @@ retenues, les blocs et IPv6 sont exclus. Le pays utilise les `allowedValues` du
 fournisseur ; la destination est imposée côté serveur au `expected_service` du
 profil choisi et affichée en lecture seule. Il faut autoriser GET/POST
 `/order/cart/*` et les configurations d’items dans la clé OVH.
+
+
+### Comparer les VPS routeurs et renseigner les options IP
+
+Le sélecteur d’offres affiche le matériel et le prix de base HT/mois. Les filtres
+RAM, vCPU, capacité disque et SSD/NVMe se combinent ; le tri prix/RAM/vCPU/disque
+fonctionne en ordre croissant ou décroissant. Les prix inconnus restent en fin de
+liste. Une facturation annuelle est ramenée au mois, avec indication de son
+équivalent et de sa période de paiement. Le tarif standard mensuel est préféré
+aux remises conditionnées à un autre mode de tarification. Les options, frais
+initiaux et conditions d’engagement sont à vérifier dans le devis final.
+
+Pour une IPv4 individuelle attachée au VPS routeur, laisser `nexthop`, `nic`,
+`TECH_ACCOUNT` et `ADMIN_ACCOUNT` vides sauf besoin explicite. Ces champs
+facultatifs sont regroupés dans Options avancées ; un champ déclaré obligatoire
+par OVH reste visible dans le formulaire principal. `nexthop` n’est pas le
+next-hop privé pfSense/VM. `nic` désigne une information de compte/contact OVH,
+pas une interface réseau ; le guide OVH indique l’e-mail principal du compte.
+Les champs ACCOUNT permettent de choisir les contacts technique et administratif.
+Le devis vérifié avec OVH a été accepté avec pays et destination, sans ces quatre
+options. Aucune délégation de contact n’est appliquée par défaut dans l’app.
