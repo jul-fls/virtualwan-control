@@ -8,7 +8,7 @@ Inside the template:
 
 ```sh
 apt-get update
-apt-get install cloud-init qemu-guest-agent ifupdown resolvconf curl openssh-server
+apt-get install cloud-init qemu-guest-agent ifupdown resolvconf curl openssh-server keyboard-configuration console-setup
 systemctl enable qemu-guest-agent ssh
 ```
 
@@ -61,6 +61,11 @@ Sources: [Debian cloud images](https://cloud.debian.org/images/cloud/),
 [cloud-init ENI renderer](https://github.com/canonical/cloud-init/blob/main/cloudinit/net/eni.py).
 
 ## Graphical console for the client portal
+
+New clones default to a French AZERTY keyboard (`keyboard: fr` in Proxmox
+and persistent `XKBLAYOUT="fr"`, `pc105` in the Debian guest). Cloud-init
+installs keyboard-configuration/console-setup and applies setupcon after package
+installation. This does not change locale or existing customer VM layouts.
 
 New clones are configured with `vga: std` and their inherited `serial0` device
 removed while stopped. Cloud-init configures the Debian GRUB console for tty0

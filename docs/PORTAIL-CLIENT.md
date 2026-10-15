@@ -102,6 +102,20 @@ maintien activable : un clic enfonce, un second relâche. Tab, Échap et
 Ctrl+Alt+Suppr sont envoyés directement. « Relâcher les touches », la fermeture
 et la perte de focus évitent de laisser un modificateur enfoncé.
 
+Le sélecteur **Clavier du VPS** propose Français AZERTY (défaut), QWERTY US,
+QWERTY UK, QWERTZ allemand et touches physiques sans adaptation. Le choix est
+mémorisé par VM dans ce navigateur et retrouvé dans l’onglet dédié. Il indique
+la disposition **du système invité**, pas celle du poste : si une ancienne VM
+est encore en QWERTY US, choisir Anglais US permet de taper depuis un AZERTY.
+Les caractères sont adaptés aux scancodes QEMU, y compris Shift/AltGr ; les
+raccourcis et les relâchements de touches sont conservés. Pour une disposition
+personnalisée, une méthode de saisie ou des touches mortes non standard,
+utiliser le mode physique avec les mêmes réglages local/invité.
+
+Les nouveaux clones Debian sont configurés en AZERTY français de façon
+persistante. Cette mise à jour ne modifie pas les claviers des VM existantes.
+Le réglage cloud-init suit [la configuration clavier Debian](https://wiki.debian.org/Keyboard).
+
 « Préparer l’affichage graphique » demande confirmation puis exécute en
 arrière-plan : arrêt ACPI propre, attente de la tâche Proxmox **et** de l’état
 arrêté, suppression de serial0/configuration VGA std, vérification et démarrage.

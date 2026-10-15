@@ -372,3 +372,23 @@ and production databases were not modified from this workstation.
 Actual guest ACPI shutdown/start, QEMU VGA output and key handling inside a real
 guest remain rollout checks on a disposable VM. The UI/browser and adapter
 sequencing checks above do not substitute for those infrastructure tests.
+
+## Console keyboard layouts and French clone default — 2026-10-15
+
+- Offline Linux suite: **238 tests passed**. A mocked PVE provisioning run
+  verifies persistent French /etc/default/keyboard, console package installation
+  and setupcon application, Proxmox keyboard=fr, and unchanged public /32 network.
+- Node keyboard tests pass: AZERTY/QWERTY US/UK/QWERTZ translations, letters,
+  digits, punctuation, accents, Shift/AltGr, Caps Lock, matching key-up after
+  modifier changes, physical mode, layout changes and handler restoration.
+- Headless Chrome console controls and full customer flow pass. Tests exercise
+  layout selection/localStorage, the real vendored noVNC sendKey serializer with
+  a fake socket (QEMU scancodes for a with AZERTY and QWERTY), existing modifier
+  buttons, fullscreen and detached console controls. No JavaScript errors.
+- Docker build and git whitespace checks pass. All browser checks use an
+  isolated local demo container; no existing guest/template was modified.
+
+A real Debian clone's package installation/VT keymap after first boot and typed
+characters in QEMU still require rollout validation. Custom keymaps, IMEs and
+nonstandard dead-key combinations should use matching local/guest keymaps in
+physical mode. This update does not rewrite existing guests' keyboard config.

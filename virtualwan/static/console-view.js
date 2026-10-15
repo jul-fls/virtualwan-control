@@ -1,17 +1,20 @@
 import RFB from './novnc/core/rfb.js';
+import {LayoutKeyboard,layouts} from './keyboard-layout.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const modifiers={ctrl:[0xffe3,'ControlLeft','Ctrl'],alt:[0xffe9,'AltLeft','Alt'],meta:[0xffeb,'MetaLeft','Windows']};
 const keys={tab:[0xff09,'Tab'],esc:[0xff1b,'Escape']};
 
 export class ConsoleView{
     constructor(container,{vm,api,onDetach=()=>{},RFBClass=RFB,createSocket=url=>new WebSocket(url)}={}){
-        this.container=container;this.vm=vm;this.api=api;this.onDetach=onDetach;this.RFBClass=RFBClass;this.createSocket=createSocket;this.held=new Set();this.rfb=null;this.socket=null;this.connected=false;this.disposed=false;
+        this.container=container;this.vm=vm;this.api=api;this.onDetach=onDetach;this.RFBClass=RFBClass;this.createSocket=createSocket;this.held=new Set();this.layout='fr';try{const saved=localStorage.getItem('vwan.console.layout.'+vm.id);if(Object.hasOwn(layouts,saved))this.layout=saved;}catch{}this.keyboard=null;this.rfb=null;this.socket=null;this.connected=false;this.disposed=false;
         this.blur=()=>this.releaseModifiers();this.visibility=()=>{if(document.hidden)this.releaseModifiers();};this.fullscreen=()=>this.updateFullscreen();
         window.addEventListener('blur',this.blur);document.addEventListener('visibilitychange',this.visibility);document.addEventListener('fullscreenchange',this.fullscreen);
         const href='/client/console/'+encodeURIComponent(vm.id);
-        container.innerHTML=`<section class="console-workspace"><div class="console-toolbar" role="toolbar" aria-label="Contrôles de la console"><div class="console-key-controls">${Object.entries(modifiers).map(([id,[,,name]])=>`<button type="button" data-console="modifier" data-key="${id}" aria-pressed="false" title="Maintenir ${name} jusqu’au prochain clic" disabled>${name}</button>`).join('')}<button type="button" data-console="key" data-key="tab" disabled>Tab</button><button type="button" data-console="key" data-key="esc" disabled>Esc</button><button type="button" data-console="cad" disabled>Ctrl + Alt + Suppr</button><button type="button" data-console="release" disabled>Relâcher les touches</button></div><div class="console-window-controls"><button type="button" data-console="fullscreen">Plein écran</button><a class="contract-link" data-console="tab" href="${esc(href)}" target="_blank" rel="noopener noreferrer">Nouvel onglet ↗</a><button type="button" data-console="window">Nouvelle fenêtre ↗</button></div></div><div class="console-meta"><span data-console-status role="status">Connexion…</span><span data-console-held aria-live="polite">Aucune touche maintenue</span></div><div class="console-screen" data-console-screen></div><p class="console-help">Ctrl, Alt et Windows restent maintenues jusqu’au prochain clic. Les touches sont relâchées en quittant la fenêtre ou la console.</p></section>`;
+        container.innerHTML=`<section class="console-workspace"><div class="console-toolbar" role="toolbar" aria-label="Contrôles de la console"><div class="console-key-controls">${Object.entries(modifiers).map(([id,[,,name]])=>`<button type="button" data-console="modifier" data-key="${id}" aria-pressed="false" title="Maintenir ${name} jusqu’au prochain clic" disabled>${name}</button>`).join('')}<button type="button" data-console="key" data-key="tab" disabled>Tab</button><button type="button" data-console="key" data-key="esc" disabled>Esc</button><button type="button" data-console="cad" disabled>Ctrl + Alt + Suppr</button><button type="button" data-console="release" disabled>Relâcher les touches</button></div><div class="console-window-controls"><label class="console-layout">Clavier du VPS<select data-console-layout aria-label="Disposition du clavier du VPS">${Object.entries(layouts).map(([id,name])=>`<option value="${id}" ${this.layout===id?'selected':''}>${name}</option>`).join('')}</select></label><button type="button" data-console="fullscreen">Plein écran</button><a class="contract-link" data-console="tab" href="${esc(href)}" target="_blank" rel="noopener noreferrer">Nouvel onglet ↗</a><button type="button" data-console="window">Nouvelle fenêtre ↗</button></div></div><div class="console-meta"><span data-console-status role="status">Connexion…</span><span data-console-held aria-live="polite">Aucune touche maintenue</span></div><div class="console-screen" data-console-screen></div><p class="console-help">Ctrl, Alt et Windows restent maintenues jusqu’au prochain clic. Les touches sont relâchées en quittant la fenêtre ou la console. Choisissez la disposition configurée dans le VPS : pour une ancienne VM en QWERTY, sélectionnez Anglais US, même si votre clavier est AZERTY.</p></section>`;
         this.workspace=container.querySelector('.console-workspace');this.screen=container.querySelector('[data-console-screen]');
         this.click=e=>this.handleClick(e);container.addEventListener('click',this.click);
+        this.change=e=>{if(!e.target.matches('[data-console-layout]'))return;this.releaseModifiers();this.layout=e.target.value;this.keyboard?.setLayout(this.layout);try{localStorage.setItem('vwan.console.layout.'+vm.id,this.layout);}catch{}this.rfb?.focus();};container.addEventListener('change',this.change);
+        this.keyState=e=>{if(this.keyboard)this.keyboard.capsLock=e.getModifierState('CapsLock');};this.screen.addEventListener('keydown',this.keyState,true);this.screen.addEventListener('keyup',this.keyState,true);
     }
     setStatus(message){if(!this.disposed)this.container.querySelector('[data-console-status]').textContent=message;}
     setConnected(value){
@@ -31,7 +34,7 @@ export class ConsoleView{
     }
     releaseModifiers(){
         for(const key of this.held){const [symbol,code]=modifiers[key];if(this.connected)this.rfb?.sendKey(symbol,code,false);}
-        this.held.clear();if(!this.disposed)this.updateModifiers();
+        this.held.clear();this.keyboard?.release();if(!this.disposed)this.updateModifiers();
     }
     async handleClick(event){
         const b=event.target.closest('[data-console]');if(!b||!this.container.contains(b))return;
@@ -69,7 +72,7 @@ export class ConsoleView{
             socket.addEventListener('open',()=>{
                 if(this.disposed){socket.close();return;}
                 socket.send(JSON.stringify({ticket:data.ticket}));
-                this.rfb=new this.RFBClass(this.screen,socket,{credentials:{password:data.password}});this.rfb.scaleViewport=true;this.rfb.resizeSession=true;
+                this.rfb=new this.RFBClass(this.screen,socket,{credentials:{password:data.password}});this.keyboard=new LayoutKeyboard(this.rfb,this.layout);this.rfb.scaleViewport=true;this.rfb.resizeSession=true;
                 this.rfb.addEventListener('connect',()=>{if(this.disposed)return;this.setConnected(true);this.setStatus('Connecté');this.rfb.focus();});
                 this.rfb.addEventListener('disconnect',()=>{if(this.disposed)return;this.setConnected(false);this.setStatus('Déconnecté');});
                 this.rfb.addEventListener('securityfailure',()=>this.setStatus('La connexion à l’écran a été refusée. Rouvrez la console pour réessayer.'));
@@ -77,10 +80,10 @@ export class ConsoleView{
             socket.addEventListener('error',()=>this.setStatus('Connexion à l’écran interrompue. Rouvrez la console pour réessayer.'));
         }catch(error){this.setStatus(error.message);}
     }
-    disconnect(){this.releaseModifiers();this.rfb?.disconnect();this.socket?.close();this.setConnected(false);}
+    disconnect(){this.releaseModifiers();this.keyboard?.destroy();this.keyboard=null;this.rfb?.disconnect();this.socket?.close();this.setConnected(false);}
     destroy(){
         if(this.disposed)return;
         this.disconnect();if(document.fullscreenElement===this.workspace)document.exitFullscreen().catch(()=>{});
-        window.removeEventListener('blur',this.blur);document.removeEventListener('visibilitychange',this.visibility);document.removeEventListener('fullscreenchange',this.fullscreen);this.container.removeEventListener('click',this.click);this.disposed=true;
+        window.removeEventListener('blur',this.blur);document.removeEventListener('visibilitychange',this.visibility);document.removeEventListener('fullscreenchange',this.fullscreen);this.container.removeEventListener('click',this.click);this.container.removeEventListener('change',this.change);this.screen.removeEventListener('keydown',this.keyState,true);this.screen.removeEventListener('keyup',this.keyState,true);this.disposed=true;
     }
 }
