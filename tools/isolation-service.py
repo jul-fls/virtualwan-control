@@ -29,7 +29,7 @@ def segments(registry):
         if 'legacy' in result:raise ValueError('Reserved segment name')
         result['legacy']={k:v for k,v in registry.items() if k!='segments'}
     if not result:raise ValueError('No configured segment')
-    vmids=set();public=set();macs=set();bridges=set()
+    vmids=set();public=set();macs=set();bridges=set();ipv6=set()
     for name,config in result.items():
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}',name):raise ValueError('Invalid segment name')
         for node,params in config['nodes'].items():
@@ -40,6 +40,9 @@ def segments(registry):
             for value,bucket in ((v['vmid'],vmids),(v['public_ip'],public),(v['mac'].lower(),macs)):
                 if value in bucket:raise ValueError('Duplicate VM/MAC/public identity across segments')
                 bucket.add(value)
+            if v.get('public_ipv6'):
+                if v['public_ipv6'] in ipv6:raise ValueError('Duplicate IPv6 across segments')
+                ipv6.add(v['public_ipv6'])
     return result
 
 def apply(force=False):
@@ -77,6 +80,8 @@ def register(args):
     if args.segment not in items:raise ValueError('Unknown segment; bootstrap it before provisioning')
     target=registry if args.segment=='legacy' else registry['segments'][args.segment]
     item={'vmid':args.vmid,'mac':args.mac.lower(),'public_ip':args.public_ip,'next_hop':args.next_hop}
+    if args.public_ipv6:
+        item.update(public_ipv6=args.public_ipv6,link_local_ipv6=args.link_local_ipv6)
     old=next((v for v in target['clients'] if v['vmid']==args.vmid),None)
     if old and old!=item:raise ValueError('Registered identity conflict')
     if not old:
@@ -87,9 +92,9 @@ def register(args):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('action',choices=['apply','pre-start','register','status','capabilities'])
     parser.add_argument('--force',action='store_true');parser.add_argument('--segment',default='legacy')
-    parser.add_argument('--vmid',type=int);parser.add_argument('--mac');parser.add_argument('--public-ip');parser.add_argument('--next-hop')
+    parser.add_argument('--vmid',type=int);parser.add_argument('--mac');parser.add_argument('--public-ip');parser.add_argument('--next-hop');parser.add_argument('--public-ipv6');parser.add_argument('--link-local-ipv6')
     args=parser.parse_args()
-    if args.action=='capabilities':print(json.dumps({'multi_segment':True,'legacy_registry':True}));return
+    if args.action=='capabilities':print(json.dumps({'multi_segment':True,'legacy_registry':True,'ipv6':True}));return
     with open('/run/virtualwan-isolation.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         if args.action=='apply':apply(args.force)

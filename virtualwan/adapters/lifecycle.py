@@ -7,6 +7,7 @@ import sys
 from .provision import Journal,Remote,Cloudflare,Ovh,secret,wait_dns
 from .pfsense import PfSense
 from ..hostnames import stock_hostname
+from ..ipv6 import ipv6_settings
 
 
 def check_aliases(cf,ip,fqdn,client,log,preflight=False,legacy_name=None):
@@ -46,6 +47,17 @@ def main():
             pve=Remote(cfg['pve'],log)
             before=pve.call('pve_retire_check',pve=cfg['pve'],client=client)
             log.backup('vm.before.json',json.dumps(before).encode())
+            registered=before.get('registered') or {}
+            address=client.get('public_ipv6') or registered.get('public_ipv6')
+            if address and not client.get('network_detached'):
+                raw=client.get('ipv6_config') or cfg.get('ipv6') or before.get('ipv6')
+                if not raw:raise ValueError('IPv6 allocation found; configure/import its IPv6 profile before retirement')
+                settings=ipv6_settings({**raw,'enabled':True})
+                client.update(public_ipv6=address,ipv6_config=settings)
+                cfg['retire_client']=client;path.write_text(json.dumps(cfg))
+                if cf is None:cf=Cloudflare(cfg['cloudflare'],log)
+                cf.retire_ipv6(client['fqdn'],address,check_only=True)
+                pf=PfSense(cfg['pfsense'],log,secret);pf.login();pf.retire_ipv6(settings,address,check_only=True)
             # Validate firewall ownership before stopping the VM or blackholing its IP.
             # Revalidate again at cleanup time to detect concurrent configuration edits.
             if ip:
@@ -57,6 +69,9 @@ def main():
             vps.call('vps_idle_ip',path=cfg['vps']['config_path'],primary_ip=cfg['vps']['primary_ip'],ip=ip,
                      source_base64=base64.b64encode(source).decode(),source_sha256=hashlib.sha256(source).hexdigest())
         if client:
+            if client.get('public_ipv6') and not client.get('network_detached'):
+                cf.retire_ipv6(client['fqdn'],client['public_ipv6'])
+                pf.retire_ipv6(client['ipv6_config'],client['public_ipv6'])
             if ip:
                 pf=PfSense(cfg['pfsense'],log,secret);pf.login();pf.retire(ip,client)
             pve.call('pve_retire_detach' if mode=='release' else 'pve_retire_destroy',pve=cfg['pve'],client=client)
@@ -78,6 +93,7 @@ def main():
                     if record.get('comment')=='Virtualwan managed':cf.call('DELETE','/'+record['id'])
             check_aliases(cf,ip,fqdn,client,log)
         result={'fqdn':fqdn,'public_ip':ip,'retired':bool(client) and mode!='release','mode':mode,'dns_verified':release,'journal':str(log.directory)}
+        if client and client.get('public_ipv6') and not client.get('network_detached'):result['released_ipv6']=client['public_ipv6']
         path.with_suffix('.result.json').write_text(json.dumps(result));log.event('lifecycle.complete',**result)
     finally:
         for remote in (pve,vps):

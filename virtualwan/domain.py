@@ -61,6 +61,11 @@ def profile(data):
     network=ipaddress.IPv4Network(config['pfsense']['next_hop_network'])
     if network.num_addresses>65536:raise ValueError('Sous-réseau de transit trop grand.')
     if ipaddress.IPv4Address(config['guest']['gateway']) not in network:raise ValueError('Gateway hors du réseau de transit.')
+    from .ipv6 import ipv6_settings
+    v6=ipv6_settings(config.get('ipv6'))
+    if v6:
+        if v6.get('address'):raise ValueError('IPv6 address is allocated per VM, not in a profile.')
+        config['ipv6']=v6
     capacity=positive(data.get('capacity',16),16 if data.get('provider','ovh')=='ovh' else 256)
     return {'name':label(data['name']),'provider':data.get('provider','ovh'),
             'capacity':capacity,'ready':bool(data.get('ready',False)),'config':config}

@@ -7,6 +7,14 @@ from urllib.parse import urlparse
 from . import domain
 
 OVERRIDES={
+    'VWAN_IPV6_ENABLED':('ipv6','enabled'),
+    'VWAN_IPV6_NETWORK':('ipv6','network'),
+    'VWAN_IPV6_GATEWAY_ADDRESS':('ipv6','gateway_address'),
+    'VWAN_IPV6_GATEWAY_LINK_LOCAL':('ipv6','gateway_link_local'),
+    'VWAN_IPV6_PROTECTED_NETWORKS_JSON':('ipv6','protected_networks'),
+    'VWAN_IPV6_WAN_INTERFACE':('ipv6','wan_interface'),
+    'VWAN_IPV6_PUBLIC_ALIAS':('ipv6','public_alias'),
+    'VWAN_IPV6_PROTECTED_ALIAS':('ipv6','protected_alias'),
     'VWAN_PFSENSE_URL':('pfsense','url'),
     'VWAN_PFSENSE_CONNECT_IP':('pfsense','connect_ip'),
     'VWAN_PVE_HOST':('pve','host'),
@@ -47,7 +55,13 @@ def apply_environment(control):
                         url=urlparse(value)
                         if url.scheme!='https' or not url.hostname or url.username or url.password or url.query or url.fragment or url.path not in ('','/'):
                             raise ValueError('VWAN_PFSENSE_URL doit être une URL HTTPS sans identifiants ni chemin.')
-                    item['config'][section][field]=value
+                    if name=='VWAN_IPV6_ENABLED':
+                        if value.lower() not in ('true','false','1','0'):raise ValueError('VWAN_IPV6_ENABLED: true/false attendu.')
+                        value=value.lower() in ('true','1')
+                    if name=='VWAN_IPV6_PROTECTED_NETWORKS_JSON':
+                        value=json.loads(value)
+                        if not isinstance(value,list):raise ValueError('IPv6 protected networks must be a JSON array.')
+                    item['config'].setdefault(section,{})[field]=value
         seen=set()
         for item in items:
             if not isinstance(item,dict):raise ValueError(variable+' : objet JSON attendu.')

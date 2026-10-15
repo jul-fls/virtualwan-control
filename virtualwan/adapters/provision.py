@@ -23,6 +23,7 @@ import paramiko
 import requests
 
 from .pfsense import PfSense
+from ..ipv6 import ipv6_settings,ipv6_validate_address
 
 
 def secret(name):
@@ -119,7 +120,7 @@ class Remote:
         self.path = '/tmp/virtualwan-provision-' + journal.run_id + '.py'
         self.log.event('ssh.script.upload.begin', host=cfg['host'], path=self.path)
         with self.sftp.file(self.path, 'wx') as f:
-            f.write(Path(__file__).with_name('remote.py').read_bytes())
+            f.write(Path(__file__).parents[1].joinpath('ipv6.py').read_bytes()+b'\n'+Path(__file__).with_name('remote.py').read_bytes())
         self.sftp.chmod(self.path, 0o600)
         self.log.event('ssh.script.upload.end', host=cfg['host'], path=self.path)
         if cfg.get('sudo'):
@@ -213,28 +214,43 @@ class Cloudflare:
     def records_for_ip(self,ip):
         # Exact server-side filter plus local verification: never mistake another
         # IP's records for stale aliases if a provider ignores a filter.
-        return [r for r in self.records({'type':'A','content.exact':ip}) if r.get('type')=='A' and r.get('content')==ip]
+        return [r for r in self.records({'type':'AAAA' if ':' in ip else 'A','content.exact':ip}) if r.get('type')==('AAAA' if ':' in ip else 'A') and r.get('content')==ip]
 
-    def inspect(self, fqdn, ip):
-        # Include CNAME and AAAA conflicts; no half-working IPv6 is published.
-        records = [r for r in self.records({'name.exact':fqdn}) if r.get('name','').lower().rstrip('.')==fqdn.lower().rstrip('.')]
+    def inspect(self, fqdn, ip, ipv6=None):
+        records=[r for r in self.records({'name.exact':fqdn}) if r.get('name','').lower().rstrip('.')==fqdn.lower().rstrip('.')]
+        expected={'A':ip}
+        if ipv6:expected['AAAA']=str(ipaddress.IPv6Address(ipv6))
         for r in records:
-            if r['type'] != 'A' or r['content'] != ip:
-                raise ValueError('Existing DNS name conflicts with requested public IPv4')
-        if len(records) > 1:
-            raise ValueError('Multiple DNS records on managed hostname')
-        return records
+            if r['type'] not in expected or r['content']!=expected[r['type']]:raise ValueError('Existing DNS name conflicts with requested public addresses')
+        if any(sum(r['type']==kind for r in records)>1 for kind in expected):raise ValueError('Multiple DNS records on managed hostname')
+        return [r for r in records if r['type']=='A']
 
-    def ensure(self, fqdn, ip):
-        records = self.inspect(fqdn, ip)
-        data = {'type': 'A', 'name': fqdn, 'content': ip, 'ttl': self.cfg.get('ttl', 300), 'proxied': False, 'comment': 'Virtualwan managed'}
-        if not records:
-            self.call('POST', json=data)
-        elif records[0].get('proxied'):
-            self.call('PATCH', '/' + records[0]['id'], json={'proxied': False})
-        verified = self.inspect(fqdn, ip)
-        if not verified or verified[0].get('proxied'):
-            raise RuntimeError('Cloudflare DNS readback failed')
+    def ensure(self, fqdn, ip, ipv6=None):
+        records=self.inspect(fqdn,ip,ipv6)
+        data={'type':'A','name':fqdn,'content':ip,'ttl':self.cfg.get('ttl',300),'proxied':False,'comment':'Virtualwan managed'}
+        if not records:self.call('POST',json=data)
+        elif records[0].get('proxied'):self.call('PATCH','/'+records[0]['id'],json={'proxied':False})
+        verified=self.inspect(fqdn,ip,ipv6)
+        if not verified or verified[0].get('proxied'):raise RuntimeError('Cloudflare DNS readback failed')
+
+    def ensure_ipv6(self,fqdn,ip,address):
+        self.inspect(fqdn,ip,address)
+        records=[r for r in self.records_for_ip(address) if r['name'].lower().rstrip('.')==fqdn.lower().rstrip('.')]
+        data={'type':'AAAA','name':fqdn,'content':address,'ttl':self.cfg.get('ttl',300),'proxied':False,'comment':'Virtualwan managed'}
+        if not records:self.call('POST',json=data)
+        elif len(records)!=1:raise ValueError('Multiple AAAA records')
+        elif records[0].get('proxied'):self.call('PATCH','/'+records[0]['id'],json={'proxied':False})
+        records=[r for r in self.records_for_ip(address) if r['name'].lower().rstrip('.')==fqdn.lower().rstrip('.')]
+        if len(records)!=1 or records[0].get('proxied'):raise RuntimeError('IPv6 DNS readback failed')
+
+    def retire_ipv6(self,fqdn,address,check_only=False):
+        records=self.records_for_ip(address)
+        for r in records:
+            if r.get('name','').lower().rstrip('.')!=fqdn.lower().rstrip('.') or not (r.get('comment')=='Virtualwan managed' or re.fullmatch(r'Virtualwan IPv6 pilot VM[0-9]+',r.get('comment',''))):
+                raise ValueError('Foreign AAAA references client IPv6; inspect before release: '+r.get('name',''))
+        if not check_only:
+            for r in records:self.call('DELETE','/'+r['id'])
+            if self.records_for_ip(address):raise RuntimeError('Client AAAA cleanup incomplete')
 
 
 class Ovh:
@@ -315,7 +331,7 @@ def wait_dns(fqdn, ip, log, timeout=180):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            answer = {str(x) for x in resolver.resolve(fqdn, 'A', lifetime=5)}
+            answer = {str(x) for x in resolver.resolve(fqdn, 'AAAA' if ':' in ip else 'A', lifetime=5)}
             log.event('dns.check', name=fqdn, answers=sorted(answer))
             if answer == {ip}:
                 return
@@ -334,6 +350,13 @@ def verify_guest(value, cfg, fqdn, log):
         raise ValueError('Guest default route mismatch')
     if not all('nameserver ' + address in value['dns'] for address in cfg['guest']['dns']):
         raise ValueError('Guest DNS mismatch')
+    c=ipv6_settings(cfg.get('ipv6'))
+    if c:
+        v6=value.get('ipv6',{});address=ipv6_validate_address(c,c['address'])
+        global_ips={a['local'] for d in v6.get('addresses',[]) if d['ifname']!='lo' for a in d.get('addr_info',[]) if a.get('scope')=='global'}
+        defaults=[r for r in v6.get('routes',[]) if r.get('dst')=='default']
+        if global_ips!={address} or v6.get('egress')!=address or len(defaults)!=1 or defaults[0].get('gateway')!=c['gateway_link_local']:
+            raise ValueError('Guest IPv6 address, route or egress mismatch')
     log.event('guest.network.verified', result=value)
 
 
@@ -342,6 +365,8 @@ def orchestrate(cfg, mode, log, save_config=None):
     fqdn = fqdn_for(ip, cfg['domain'],cfg.get('hostname_pattern','vps-{ipv4_compact}.{domain}'))
     p = cfg['pve']
     g = cfg['guest']
+    v6=ipv6_settings(cfg.get('ipv6'))
+    if v6:cfg['ipv6']=v6
     if g['ssh_auth'] not in ('key', 'password', 'both'):
         raise ValueError('guest.ssh_auth must be key/password/both')
     if g['username'] == 'root' or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}', g['username']):
@@ -367,7 +392,7 @@ def orchestrate(cfg, mode, log, save_config=None):
         root = pf.snapshot('pfsense.before')
         pf.preflight(root, g, ip)
         cf = Cloudflare(cfg['cloudflare'], log)
-        cf.inspect(fqdn, ip)
+        if not v6:cf.inspect(fqdn, ip)
         cfg['ovh']['primary_ip'] = cfg['vps']['primary_ip']
         ovh = Ovh(cfg['ovh'], log)
         ovh.inspect(ip, require_service=mode == 'apply')
@@ -380,24 +405,36 @@ def orchestrate(cfg, mode, log, save_config=None):
             occupied = {v['vmid'] for v in inventory['resources']}
             p['vmid'] = next(i for i in range(p.get('vmid_start', 120), 999999999) if i not in occupied)
             log.event('vmid.allocated', vmid=p['vmid'])
+        if v6:
+            allocation=pve.call('pve_ipv6_allocate',pve=p,ipv6=v6,ip=ip)
+            v6['address']=ipv6_validate_address(v6,allocation['public_ipv6']);cfg['ipv6']=v6
+            cf.inspect(fqdn,ip,v6['address']);pf.preflight_ipv6(root,v6)
+            log.event('ipv6.allocated',address=v6['address'],vmid=p['vmid'],source=allocation['source'])
         if save_config:
             save_config(cfg)
-        log.event('preflight.complete', inventory=inventory)
+        log.event('preflight.complete' , inventory=inventory)
         if mode == 'inspect':
             return
         if cfg.get('start_vm') and cfg.get('require_client_isolation', True) and not ((inventory.get('isolation') or {}).get('active')):
             raise ValueError('Client isolation service/table is missing on at least one registered PVE node. Restore isolation before starting a client.')
+        if v6:
+            sources={}
+            for name in ('public-policy.py','isolation-service.py'):
+                source=Path(__file__).parents[2].joinpath('tools',name).read_bytes()
+                sources[name]={'base64':base64.b64encode(source).decode(),'sha256':hashlib.sha256(source).hexdigest()}
+            pve.call('pve_ipv6_prepare',pve=p,ipv6=v6,sources=sources)
         guest_password = secret(g['password_env']) if g['ssh_auth'] in ('password', 'both') else ''
         if '\n' in guest_password:
             raise ValueError('Guest password cannot contain newline')
-        vm = pve.call('pve_create', pve=p, guest=g, ip=ip, fqdn=fqdn, public_key=public_key, guest_password=guest_password,next_hop=pf.cfg['next_hop'])
-        cf.ensure(fqdn, ip)
+        vm = pve.call('pve_create', pve=p, guest=g, ip=ip, fqdn=fqdn, public_key=public_key, guest_password=guest_password,next_hop=pf.cfg['next_hop'],**({'ipv6':v6} if v6 else {}))
+        cf.ensure(fqdn, ip,**({'ipv6':v6['address']} if v6 else {}))
         wait_dns(fqdn, ip, log)
         ovh.ensure(ip, fqdn)
         router_source=(Path(__file__).parents[2]/'tools/virtualwan-router.py').read_bytes()
         vps.call('vps_apply', path=cfg['vps']['config_path'], primary_ip=cfg['vps']['primary_ip'], ip=ip,
                  source_base64=base64.b64encode(router_source).decode(),source_sha256=hashlib.sha256(router_source).hexdigest())
         pf.configure(pf.snapshot('pfsense.pre-change'), ip, fqdn, vm['mac'])
+        if v6:pf.configure_ipv6(pf.snapshot('pfsense.ipv6.pre-change'),v6,v6['address'])
         if not cfg.get('start_vm'):
             log.event('provisioned.stopped', vmid=p['vmid'], fqdn=fqdn)
             return
@@ -409,7 +446,7 @@ def orchestrate(cfg, mode, log, save_config=None):
             deadline = time.monotonic() + 180
             while True:
                 try:
-                    verify_guest(pve.call('pve_verify', pve=p), cfg, fqdn, log)
+                    verify_guest(pve.call('pve_verify', pve=p,**({'ipv6':True} if v6 else {})), cfg, fqdn, log)
                     break
                 except (RuntimeError, ValueError) as e:
                     if time.monotonic() >= deadline:
@@ -421,7 +458,9 @@ def orchestrate(cfg, mode, log, save_config=None):
                 if not banner.startswith('SSH-'):
                     raise ValueError('Unexpected SSH banner')
                 log.event('guest.ssh.reachable', cycle=cycle, banner=banner, probe_origin='orchestrator host; external origin requires separate verification')
-        log.event('deployment.complete', vmid=p['vmid'], fqdn=fqdn, ip=ip)
+        if v6:
+            cf.ensure_ipv6(fqdn,ip,v6['address']);wait_dns(fqdn,v6['address'],log)
+        log.event('deployment.complete', vmid=p['vmid'], fqdn=fqdn, ip=ip,public_ipv6=v6['address'] if v6 else None)
     finally:
         for remote in (pve, vps):
             if remote:

@@ -68,7 +68,10 @@ def fields(html, required,allow_login=False):
     raise ValueError('pfSense form differs from expected fields: ' + ','.join(required))
 
 
-class PfSense:
+from .pfsense_ipv6 import PfSenseIPv6
+
+
+class PfSense(PfSenseIPv6):
     def __init__(self, cfg, journal, secret):
         self.cfg, self.log, self.secret = cfg, journal, secret
         self.base = cfg['url'].rstrip('/')

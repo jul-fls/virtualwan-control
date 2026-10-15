@@ -285,3 +285,18 @@ country and destination without nexthop/nic/contact overrides. The UI groups onl
 fields OVH marks optional; required fields remain visible. OVH's Additional IP
 guide identifies nic as the primary account email, not a network interface.
 Source: https://support.us.ovhcloud.com/hc/en-us/articles/360011668000-Purchasing-and-managing-Additional-IPs
+
+
+## Routed IPv6 integration — 2026-10-15
+
+- Full Linux unit/adapter suite: **195 tests passed**, including 30 IPv6 cases.
+- Docker image `virtualwan-control:dev` built successfully with the new modules.
+- Debian cloud-init ENI rendering and ifupdown dry-run passed for IPv4 /32 + IPv6
+  /128, link-local gateway and RA/autoconf disabled; no network activated by this check.
+- Headless Chrome smoke test passed across eight pages, including simulated
+  dual-stack creation, IPv6 detail display, network release and VM deletion.
+- Read-only pfSense preflight and retirement-ownership checks passed against the
+  existing pilot. No production VM was created/deleted by this code validation.
+- The earlier pilot validated the same IPv6 bridge rules, spoofing isolation,
+  inbound/outbound connectivity and persistent guest configuration. Full live
+  provisioning/removal through this new app version remains a rollout check.

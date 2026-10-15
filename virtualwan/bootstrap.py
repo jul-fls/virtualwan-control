@@ -23,6 +23,9 @@ def bundle(profile,ips):
     if cfg['vps'].get('primary_ip'):
         registry['blocked_networks'].append(cfg['vps']['primary_ip']+'/32')
         registry['administration_public_networks'].append(cfg['vps']['primary_ip']+'/32')
+    from .ipv6 import ipv6_settings
+    v6=ipv6_settings(cfg.get('ipv6'))
+    if v6:registry['ipv6']={k:v for k,v in v6.items() if k!='address'}
     notes=f'''# Onboarding: {profile['name']}
 
 This archive is a plan, not a blind network deployment. Replace every REPLACE
@@ -69,6 +72,11 @@ The running infrastructure is not changed by generating this archive.
    Mark the profile ready only after setup. Sync purchased IPs and deploy one
    test VM. Preflight verifies the route, template, Kea and isolation. Test
    Internet input/output and direct/private isolation before client delivery.
+
+Optional IPv6: configure the supplied /64 on the client interface and route it
+from your upstream router to pfSense first. Disable SLAAC/DHCPv6 on the client
+VLAN. The app adds /128 cloud-init, IPv6 isolation, scoped firewall rules and AAAA
+after guest verification. See docs/IPV6.md before enabling the profile.
 
 This first-time firewall/VLAN onboarding needs an operator's review. Purchase
 approval alone is not authorization to guess/change a physical network layout.

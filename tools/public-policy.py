@@ -1,8 +1,62 @@
 #!/usr/bin/env python3
-"""Strict public-only bridge policy: all IPv4 client exchanges use the router MAC."""
+"""Public-only bridge policy: IPv4 and optional per-client routed IPv6."""
 import ipaddress
 import json
 import re
+
+"""Opt-in per-client IPv6 bridge policy. IPv4 rules remain byte-for-byte unchanged."""
+import ipaddress
+
+def validate6(c):
+    clients=[v for v in c['clients'] if v.get('public_ipv6')]
+    if not clients:return
+    cfg=c['ipv6'];net=ipaddress.IPv6Network(cfg['network']);protected=[ipaddress.IPv6Network(x) for x in cfg['protected_networks']]
+    if net.prefixlen!=64 or not net.network_address.is_global:raise ValueError('Expected a public /64')
+    gl=ipaddress.IPv6Address(cfg['gateway_link_local']);ga=ipaddress.IPv6Address(cfg['gateway_address'])
+    if not gl.is_link_local or ga not in net:raise ValueError('Invalid IPv6 gateway')
+    if not any(net.subnet_of(n) for n in protected):raise ValueError('The complete client /64 must be protected, with explicit client exceptions')
+    seen={str(ga),str(gl)}
+    for v in clients:
+        p=ipaddress.IPv6Address(v['public_ipv6']);ll=ipaddress.IPv6Address(v['link_local_ipv6'])
+        if p not in net or not p.is_global or not ll.is_link_local:raise ValueError('Invalid client IPv6')
+        for address in (str(p),str(ll)):
+            if address in seen:raise ValueError('Duplicate IPv6 identity')
+            seen.add(address)
+
+def rules6(c,v,ports):
+    if not v.get('public_ipv6'):return []
+    cfg=c['ipv6'];gm=c['gateway_mac'].lower();m=v['mac'].lower();u=c['uplink']
+    p=v['public_ipv6'];ll=v['link_local_ipv6'];gl=cfg['gateway_link_local'];ga=cfg['gateway_address']
+    out=f'iifname {ports} oifname "{u}" ether saddr {m}'
+    inc=f'iifname "{u}" oifname {ports} ether saddr {gm}'
+    own='{ '+p+', '+ll+' }';gateway='{ '+ga+', '+gl+' }'
+    def targets(values):return '{ '+', '.join('0x'+ipaddress.IPv6Address(x).packed.hex() for x in values)+' }'
+    rows=[]
+    def add(expr,verdict='accept'):rows.append('  '+expr+' counter '+verdict)
+    # ND without extension headers, hop limit 255; target identity and LLA options pinned.
+    ns='ether type ip6 ip6 nexthdr ipv6-icmp ip6 hoplimit 255 icmpv6 type nd-neighbor-solicit'
+    na='ether type ip6 ip6 nexthdr ipv6-icmp ip6 hoplimit 255 icmpv6 type nd-neighbor-advert'
+    macraw='0x'+m.replace(':','');gmraw='0x'+gm.replace(':','')
+    add(f'{out} ether daddr {{ {gm}, 33:33:ff:00:00:01, '+('33:33:ff:'+':'.join(f'{x:02x}' for x in ipaddress.IPv6Address(gl).packed[-3:]))+f' }} {ns} ip6 saddr {own} ip6 daddr {{ {ga}, {gl}, '+str(ipaddress.IPv6Address(int(ipaddress.IPv6Address('ff02::1:ff00:0'))|(int(ipaddress.IPv6Address(ga))&0xffffff)))+', '+str(ipaddress.IPv6Address(int(ipaddress.IPv6Address('ff02::1:ff00:0'))|(int(ipaddress.IPv6Address(gl))&0xffffff)))+f' }} @th,64,128 {targets([ga,gl])} ip6 length 32 @th,192,16 0x0101 @th,208,48 {macraw}')
+    add(f'{out} ether daddr {gm} {na} ip6 saddr {own} ip6 daddr {gateway} @th,64,128 {targets([p,ll])} ip6 length 32 @th,192,16 0x0201 @th,208,48 {macraw}')
+    # DAD of this client's two identities only; never reaches another VM port.
+    add(f'{out} ether daddr {{ {','.join('33:33:ff:'+':'.join(f'{x:02x}' for x in ipaddress.IPv6Address(a).packed[-3:]) for a in [p,ll])} }} {ns} ip6 saddr :: ip6 length 24 @th,64,128 {targets([p,ll])}')
+    add(f'{inc} {ns} ip6 saddr {gateway} @th,64,128 {targets([p,ll])} ip6 length 32 @th,192,16 0x0101 @th,208,48 {gmraw}')
+    add(f'{inc} ether daddr {m} {na} ip6 saddr {gateway} ip6 daddr {own} @th,64,128 {targets([ga,gl])} ip6 length 32 @th,192,16 0x0201 @th,208,48 {gmraw}')
+    # Only ND above is permitted. Reject redirects, RA, RS and all remaining ND.
+    add(f'{out} ether type ip6 meta l4proto ipv6-icmp icmpv6 type {{ nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect }}','drop')
+    add(f'{inc} ether type ip6 meta l4proto ipv6-icmp icmpv6 type {{ nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect }}','drop')
+    protected='{ '+', '.join(cfg['protected_networks'])+' }'
+    public='{ '+', '.join(x['public_ipv6'] for x in c['clients'] if x.get('public_ipv6'))+' }'
+    # Replies to admin connections from the home public prefix remain possible.
+    add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr 2000::/3 ct direction reply ct state {{ established, related }}')
+    add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr {public}')
+    add(f'{out} ether type ip6 ip6 daddr {protected}','drop')
+    add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr 2000::/3')
+    add(f'{inc} ether daddr {m} ether type ip6 ip6 saddr {gateway} ip6 daddr {own} meta l4proto ipv6-icmp icmpv6 type {{ destination-unreachable, packet-too-big, time-exceeded, parameter-problem }}')
+    add(f'{inc} ether daddr {m} ether type ip6 ip6 saddr 2000::/3 ip6 daddr {p}')
+    return rows
+
 
 TABLE = 'virtualwan_isolation'
 
@@ -47,6 +101,7 @@ def validate(c):
             identities.add(identity)
     for subnet in c['blocked_networks']:
         ipaddress.IPv4Network(subnet)
+    validate6(c)
     return c
 
 
@@ -78,7 +133,7 @@ def generate(c):
     chain('host_output','output');rule(f'meta obrname {bridges}','drop');lines.append(' }')
     chain('clients','forward',0)
     lines.append(f'  meta ibrname != "{b}" return')
-    # No DHCP, no IPv6 and no tagged traffic in this public-only template.
+    # No DHCP or tagged traffic; IPv6 is opt-in per registered client.
     rule('ether type { 0x8100, 0x88a8 }','drop')
     for v in c['clients']:
         ports='{ '+', '.join(json.dumps(x) for x in (f'tap{v["vmid"]}i0',f'fwpr{v["vmid"]}p0'))+' }'
@@ -95,6 +150,7 @@ def generate(c):
             rule(f'{incoming} ether type ip ip daddr {p} ip saddr @administration_v4')
         rule(f'{incoming} ether type ip ip saddr @protected_v4','drop')
         rule(f'{incoming} ether type ip ip daddr {p}')
+        lines.extend(rules6(c,v,ports))
         arp='ether type arp arp htype 1 arp ptype ip arp hlen 6 arp plen 4'
         aout=f'iifname {ports} oifname "{u}" ether saddr {m}'
         ain=f'iifname "{u}" oifname {ports} ether saddr {gm}'

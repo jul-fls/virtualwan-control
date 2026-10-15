@@ -472,3 +472,12 @@ pas une interface réseau ; le guide OVH indique l’e-mail principal du compte.
 Les champs ACCOUNT permettent de choisir les contacts technique et administratif.
 Le devis vérifié avec OVH a été accepté avec pays et destination, sans ces quatre
 options. Aucune délégation de contact n’est appliquée par défaut dans l’app.
+
+### IPv6 publique optionnelle
+
+Un profil peut fournir une IPv6 publique `/128` par VM en plus de son IPv4.
+Le `/64` doit être préalablement routé vers pfSense et configuré sur l’interface
+cliente. Cloud-init, isolation PVE, règles HTTPS pfSense, AAAA et nettoyage
+libération/suppression sont pris en charge. Les profils IPv4 seuls restent valides.
+Configuration en variables d’environnement, migration des VM existantes et
+limites : [docs/IPV6.md](docs/IPV6.md).

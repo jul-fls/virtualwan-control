@@ -12,6 +12,7 @@ from . import domain
 from .adapters.provision import fqdn_for
 from .providers import OvhAPI,DemoOvh
 from .store import ident
+from .ipv6 import ipv6_settings,ipv6_address,ipv6_link_local
 
 
 class Control:
@@ -29,6 +30,11 @@ class Control:
             old=db.execute('SELECT revision FROM profiles WHERE id=?',(key,)).fetchone()
             count=db.execute('SELECT count(*) FROM ip_pool WHERE profile_id=?',(key,)).fetchone()[0]
             if count>item['capacity']:raise domain.Conflict('La capacité est inférieure aux IP déjà inventoriées.')
+            if old:
+                previous=json.loads(db.execute('SELECT data FROM profiles WHERE id=?',(key,)).fetchone()['data'])
+                active6=any(json.loads(r['data']).get('public_ipv6') for r in db.execute('SELECT data FROM deployments WHERE profile_id=?',(key,)))
+                before6=ipv6_settings(previous['config'].get('ipv6'));after6=ipv6_settings(item['config'].get('ipv6'))
+                if active6 and before6 and (not after6 or any(before6[k]!=after6[k] for k in ('network','public_alias','protected_alias','gateway_link_local','gateway_address','wan_interface'))):raise domain.Conflict('Retirer les allocations IPv6 avant de changer leur réseau ou leurs alias.')
             # Different routers require distinct routed segments; a shared firewall may be reused.
             for row in db.execute('SELECT id,data FROM profiles WHERE id!=?',(key,)):
                 other=json.loads(row['data'])
@@ -37,6 +43,11 @@ class Control:
                 service=item['config']['ovh'].get('expected_service')
                 if service and service==other['config']['ovh'].get('expected_service') and item['config']['ovh']['endpoint']==other['config']['ovh']['endpoint']:raise domain.Conflict('Ce service OVH possède déjà un profil.')
                 same_firewall=item['config']['pfsense']['url']==other['config']['pfsense']['url'] or (item['config']['pfsense'].get('connect_ip') and item['config']['pfsense'].get('connect_ip')==other['config']['pfsense'].get('connect_ip'))
+                a6=ipv6_settings(item['config'].get('ipv6'));b6=ipv6_settings(other['config'].get('ipv6'))
+                if a6 and b6:
+                    import ipaddress
+                    if ipaddress.IPv6Network(a6['network']).overlaps(ipaddress.IPv6Network(b6['network'])):raise domain.Conflict('Chaque profil IPv6 doit utiliser son propre /64.')
+                    if same_firewall and {a6['public_alias'],a6['protected_alias']} & {b6['public_alias'],b6['protected_alias']}:raise domain.Conflict('Les alias IPv6 doivent être distincts entre profils.')
                 if same_firewall:
                     same_iface=item['config']['pfsense'].get('public_interface') and item['config']['pfsense'].get('public_interface')==other['config']['pfsense'].get('public_interface')
                     import ipaddress
@@ -51,6 +62,7 @@ class Control:
         old=self.store.document('profiles',key);item={k:deepcopy(old[k]) for k in ('name','provider','capacity','ready','config')}
         item.update(name=name,ready=False)
         item['config']['pfsense'].update(next_hop_network=network,next_hop=None,public_interface=None,wireguard_interface=None,wireguard_gateway=None)
+        item['config'].pop('ipv6',None)
         item['config']['guest']['gateway']=gateway
         item['config']['vps'].update(host='',primary_ip='')
         item['config']['ovh'].update(expected_service=None,ip_block=None)
@@ -312,6 +324,10 @@ class Control:
                     pending=db.execute("SELECT state FROM jobs WHERE id=?",(existing['job_id'],)).fetchone()
                     if pending and pending['state'] in ('queued','running','interrupted','failed'):continue
                 info=json.loads(record['data']) if record else {'fqdn':ip,'job_id':run,'customer':'Discovered existing VM'}
+                if client.get('public_ipv6'):
+                    settings=ipv6_settings(cfg.get('ipv6')) or {**client.get('ipv6_config',{}),'enabled':True}
+                    info.update(public_ipv6=client['public_ipv6'],link_local_ipv6=client.get('link_local_ipv6'),ipv6_config=settings)
+                if client.get('name','').endswith('.'+cfg['domain']):info['fqdn']=client['name']
                 info.update(vmid=client['vmid'],mac=client['mac'],next_hop=client['next_hop'],node=client['node'],vm_name=client['name'],status='active' if client['status']=='running' else 'stopped',last_verified=time.time(),source='Proxmox live inventory')
                 if record:db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(info),record['id']))
                 else:db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(ident(),ip,profile_id,None,json.dumps(info)))
@@ -438,7 +454,13 @@ class Control:
                     private=(self.store.root/cfg[target]['private_key']).resolve()
                     if not private.is_relative_to(self.store.root):raise ValueError('Clé SSH hors data.')
                     cfg[target]['private_key']=str(private)
-            path=run/'lifecycle.json';path.write_text(json.dumps(cfg));os.chmod(path,0o600)
+            path=run/'lifecycle.json'
+            if path.exists() and client:
+                saved=json.loads(path.read_text()).get('retire_client',{})
+                if saved.get('vmid')!=cfg['retire_client'].get('vmid') or saved.get('mac')!=cfg['retire_client'].get('mac'):raise domain.Conflict('Retirement run identity changed')
+                for field in ('public_ipv6','ipv6_config'):
+                    if saved.get(field) and not cfg['retire_client'].get(field):cfg['retire_client'][field]=saved[field]
+            path.write_text(json.dumps(cfg));os.chmod(path,0o600)
             proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.lifecycle',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
             for line in proc.stdout:self.store.event(key,'lifecycle.progress',message=line.strip())
             if proc.wait():raise RuntimeError('Nettoyage/DNS incomplet : IP en quarantaine. Inspecter le journal avant reprise du même job.')
@@ -446,7 +468,7 @@ class Control:
         with self.store.tx() as db:
             if client and mode=='release':
                 info={k:v for k,v in client.items() if k not in ('id','ip','profile_id','model_id')}
-                info.update(status='detached',last_attachment={'ip':ip,'fqdn':client.get('fqdn')},network_detached=True)
+                info.update(status='detached',last_attachment={'ip':ip,'fqdn':client.get('fqdn'),'public_ipv6':result.get('released_ipv6') or client.get('public_ipv6'),'ipv6_config':client.get('ipv6_config')},network_detached=True,public_ipv6=None,link_local_ipv6=None,ipv6_config=None)
                 db.execute('UPDATE deployments SET ip=NULL,data=? WHERE id=?',(json.dumps(info),client['id']))
             elif client:db.execute('DELETE FROM deployments WHERE id=?',(client['id'],))
             db.execute("UPDATE ip_pool SET state=?,job_id=NULL WHERE ip=? AND job_id=?",('available' if release else 'reserved',ip,key))
@@ -536,6 +558,7 @@ class Control:
         if self.demo:
             cfg['pve']['vmid']=1000+len(self.deployments());cfg['pfsense']['next_hop']='10.254.251.'+str(10+len(self.deployments()))
             mac='02:00:'+':'.join(key[i:i+2] for i in (0,2,4,6))
+            if ipv6_settings(cfg.get('ipv6')):cfg['ipv6']['address']=ipv6_address(cfg['ipv6'],cfg['pve']['vmid'])
             result={'simulated':True,'mac':mac,'vmid':cfg['pve']['vmid'],'next_hop':cfg['pfsense']['next_hop']}
         else:
             env=os.environ.copy()
@@ -566,6 +589,11 @@ class Control:
                 self.store.event(key,'provisioning.progress',message=line.strip())
             code=process.wait()
             cfg=json.loads(config_path.read_text())
+            if ipv6_settings(cfg.get('ipv6')) and cfg['ipv6'].get('address'):
+                with self.store.tx() as db:
+                    row=db.execute('SELECT data FROM deployments WHERE ip=?',(ip,)).fetchone();saved_info=json.loads(row['data'])
+                    saved_info.update(public_ipv6=cfg['ipv6']['address'],ipv6_config=cfg['ipv6'],vmid=cfg['pve']['vmid'])
+                    db.execute('UPDATE deployments SET data=? WHERE ip=?',(json.dumps(saved_info),ip))
             if code:raise RuntimeError('Provisionnement interrompu ; consulter le journal et les snapshots chiffrés. L’IP reste en quarantaine.')
             journals=list((run/'provisioning').glob('*/run.jsonl'))
             events=[json.loads(line) for line in journals[-1].read_text().splitlines()]
@@ -573,6 +601,8 @@ class Control:
             # Remote journal payload uses result; fail closed if the adapter changes its schema.
             mac=created['result']['mac']
             result={'mac':mac,'vmid':cfg['pve']['vmid'],'next_hop':cfg['pfsense']['next_hop'],'journal':str(journals[-1].relative_to(self.store.root))}
+        if ipv6_settings(cfg.get('ipv6')):
+            result.update(public_ipv6=cfg['ipv6']['address'],link_local_ipv6=ipv6_link_local(mac),ipv6_config=cfg['ipv6'])
         with self.store.tx() as db:
             record=db.execute('SELECT data FROM deployments WHERE ip=?',(ip,)).fetchone();info=json.loads(record['data'])
             info.update(result,status='simulated' if self.demo else 'active')
