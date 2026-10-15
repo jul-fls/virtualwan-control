@@ -20,6 +20,7 @@ class Control:
         self.store=store;self.demo=demo;self.allow_purchase=allow_purchase;self.allow_provision=allow_provision
         self.provider_factory=provider_factory or (DemoOvh if demo else OvhAPI)
         self.stop=threading.Event();self.checkout_lock=threading.Lock();self.thread=None
+        self.environment_profile_id=None
 
     def provider(self,profile,run):return self.provider_factory(profile['config']['ovh'],self.store,run)
 
@@ -67,8 +68,13 @@ class Control:
             declared=json.loads(os.environ.get('VWAN_PROFILES_JSON') or '[]')
             from .environment import OVERRIDES
             overrides=any(os.environ.get(name,'').strip() for name in OVERRIDES)
-            target=os.environ.get('VWAN_PROFILE_ID','').strip()
-            if any(item.get('id')==key for item in declared) or (overrides and (target==key or not target)):
+            target=os.environ.get('VWAN_PROFILE_ID','').strip() or self.environment_profile_id
+            if overrides and not target:
+                # Match startup selection: explicit JSON takes precedence over UI profiles.
+                candidates=declared or [dict(row) for row in db.execute('SELECT id FROM profiles')]
+                if len(candidates)==1:target=candidates[0]['id']
+                else:raise domain.Conflict('Préciser VWAN_PROFILE_ID pour cibler les variables de connexion/IPv6, puis redémarrer l’application.')
+            if any(item.get('id')==key for item in declared) or (overrides and target==key):
                 raise domain.Conflict('Retirer d’abord ce profil de VWAN_PROFILES_JSON et ses variables de connexion/IPv6 ciblées, puis redémarrer l’application avant de le supprimer.')
             if db.execute('SELECT 1 FROM deployments WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des VM clientes.')
             if db.execute('SELECT 1 FROM ip_pool WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des IP en inventaire.')

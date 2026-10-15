@@ -311,3 +311,11 @@ Source: https://support.us.ovhcloud.com/hc/en-us/articles/360011668000-Purchasin
   header and creation/removal of an unused cloned router through the UI.
 - Docker build, JavaScript syntax/catalogue checks and git diff checks pass.
 - No production resources or supplier orders were changed.
+
+## Router deletion environment targeting regression — 2026-10-15
+
+Full Linux suite: **209 tests passed**. New regressions cover deleting a UI draft
+while overrides implicitly target the sole JSON-declared router, remembering the
+startup target after UI cloning without JSON, and protecting the sole database
+profile. Reapplying the declarative configuration preserves the existing router
+without recreating the deleted test draft. No production changes were made.

@@ -494,3 +494,8 @@ OVH n’est résilié. Un devis non commandé doit d’abord être annulé.
 Si le profil est déclaré dans `VWAN_PROFILES_JSON`, le retirer de cette variable
 (et retirer les variables de connexion/IPv6 qui le ciblent), puis redémarrer
 l’application avant sa suppression dans l’UI, pour éviter sa recréation.
+
+Les variables de connexion/IPv6 ne protègent que leur profil cible :
+`VWAN_PROFILE_ID`, ou le seul profil déclaré dans `VWAN_PROFILES_JSON` lorsque
+cet identifiant n’est pas renseigné. Elles n’empêchent pas de supprimer un
+brouillon indépendant créé dans l’UI.

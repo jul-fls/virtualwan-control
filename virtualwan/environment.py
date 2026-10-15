@@ -45,6 +45,7 @@ def apply_environment(control):
             if target and target not in ids:raise ValueError('VWAN_PROFILE_ID ne correspond à aucun profil.')
             if not target and len(items)!=1:raise ValueError('Plusieurs routeurs : choisir VWAN_PROFILE_ID pour les variables de connexion.')
             selected=target or ids[0]
+            control.environment_profile_id=selected
             items=deepcopy(items)
             for item in items:
                 if item.get('id')!=selected:continue
