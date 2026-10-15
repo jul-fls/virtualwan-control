@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+# SSH identities belong to this live boot, never to a distributed ISO.
+rm -f /etc/ssh/ssh_host_*key /etc/ssh/ssh_host_*key.pub
+: > /etc/machine-id
+rm -f /var/lib/dbus/machine-id
+systemctl enable qemu-guest-agent.service
+systemctl mask NetworkManager.service systemd-networkd.service networking.service
+mkdir -p /etc/live/config.conf.d
+printf '%s\n' 'LIVE_CONFIG_NOCOMPONENTS="ifupdown"' > /etc/live/config.conf.d/virtualwan.conf
+printf '%s\n' 'Virtualwan Rescue — Debian 13' 'Console: rescue / activation-specific password from your portal, then sudo -i.' 'Network and authorized SSH keys are read from this VM cloud-init CD only.' 'SSH: rescue@PUBLIC_IP, activation password or existing keys; host identity is ephemeral.' 'Disks are not automatically mounted. Use lsblk, mount, cryptsetup, fsck, testdisk, ddrescue.' > /etc/issue
+mkdir -p /etc/ssh/sshd_config.d
+# Apply after the live user exists; no shared rescue password is distributed.
+mkdir -p /etc/systemd/system/ssh.service.d
+printf '%s\n' '[Unit]' 'After=virtualwan-rescue.service' > /etc/systemd/system/ssh.service.d/virtualwan.conf
+# Boot menus auto-start, without interactive confirmation.
+true
+
+for unit in getty@ serial-getty@; do
+ mkdir -p /etc/systemd/system/$unit.service.d
+ printf '%s\n' '[Unit]' 'After=virtualwan-rescue-auth.service' > /etc/systemd/system/$unit.service.d/rescue-auth.conf
+done

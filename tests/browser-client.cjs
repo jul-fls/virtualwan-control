@@ -22,6 +22,15 @@ page.once('dialog',d=>d.accept());await page.locator('[data-action=graphical]').
 await page.locator('[data-action=console]').click();await page.locator('.console-demo').waitFor();await page.screenshot({path:path.join(out,'client-console.png'),fullPage:true});
 await page.locator('[data-console=fullscreen]').click();await page.waitForFunction(()=>!!document.fullscreenElement);await page.locator('[data-console=fullscreen]').click();await page.waitForFunction(()=>!document.fullscreenElement);
 const [consoleTab]=await Promise.all([context.waitForEvent('page'),page.locator('[data-console=tab]').click()]);await consoleTab.locator('.console-demo').waitFor();assert.equal(await consoleTab.locator('.console-toolbar').count(),1);const [consoleWindow]=await Promise.all([context.waitForEvent('page'),consoleTab.locator('[data-console=window]').click()]);await consoleWindow.locator('.console-demo').waitFor();await consoleWindow.close();await consoleTab.close();
+if(await page.locator('#client-close').isVisible())await page.locator('#client-close').click();
+page.once('dialog',d=>d.accept());await page.locator('[data-action=rescue]').click();await page.locator('#rescue-password').waitFor();
+const firstRescue=await page.locator('#rescue-password').inputValue();assert(/^[A-Za-z0-9]{12}$/.test(firstRescue));assert.equal(await page.locator('#rescue-password').getAttribute('type'),'password');
+await page.locator('[data-action=rescue-password-toggle]').click();assert.equal(await page.locator('#rescue-password').getAttribute('type'),'text');
+await page.locator('#client-close').click();assert.equal(await page.locator('#rescue-password').count(),0);await page.locator('.vm-head .badge.amber').filter({hasText:'Rescue'}).waitFor();
+await page.reload();await page.locator('[data-action=manage]').first().click();await page.locator('[data-action=tab][data-id=tools]').click();
+await page.locator('[data-action=rescue-credentials]').click();assert.equal(await page.locator('#rescue-password').inputValue(),firstRescue);await page.locator('#client-close').click();
+page.once('dialog',d=>d.accept());await page.locator('[data-action=rescue]').click();await page.waitForFunction(()=>!document.querySelector('[data-action=rescue-credentials]'));assert.equal(await page.locator('.vm-head .badge.amber').count(),0);
+page.once('dialog',d=>d.accept());await page.locator('[data-action=rescue]').click();await page.locator('#rescue-password').waitFor();assert.notEqual(await page.locator('#rescue-password').inputValue(),firstRescue);await page.locator('#client-close').click();
 await page.screenshot({path:path.join(out,'client-tools.png'),fullPage:true});
 await page.locator('nav [data-section=account]').click();await page.screenshot({path:path.join(out,'client-security.png'),fullPage:true});
 const cdp=await context.newCDPSession(page);await cdp.send('WebAuthn.enable');const {authenticatorId}=await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}});

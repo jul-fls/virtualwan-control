@@ -34,7 +34,7 @@ class ClientPortalTests(unittest.TestCase):
             self.assertEqual(getattr(self.client,method)(path,json={},headers=self.headers).status_code,401)
     def test_ownership_and_csrf_on_all_vm_routes(self):
         self.login('b@example.net','CustomerPasswordB123')
-        for method,suffix,payload in [('get','/status',{}),('get','/firewall',{}),('put','',{'display_name':'forbidden'}),('post','/power',{'action':'start'}),('post','/console',{}),('put','/reverse',{'hostname':'example.net'}),('put','/firewall',{'rules':[],'confirmation':'APPLIQUER'}),('post','/rescue',{'confirmation':'CONFIRMER'}),('post','/graphical',{})]:
+        for method,suffix,payload in [('get','/status',{}),('get','/rescue/credentials',{}),('get','/firewall',{}),('put','',{'display_name':'forbidden'}),('post','/power',{'action':'start'}),('post','/console',{}),('put','/reverse',{'hostname':'example.net'}),('put','/firewall',{'rules':[],'confirmation':'APPLIQUER'}),('post','/rescue',{'confirmation':'CONFIRMER'}),('post','/graphical',{})]:
             with self.subTest(suffix=suffix):self.assertEqual(getattr(self.client,method)('/api/portal/vps/'+self.vm+suffix,json=payload,headers=self.headers).status_code,404)
         self.login();self.assertEqual(self.client.post('/api/portal/vps/'+self.vm+'/power',json={'action':'start'}).status_code,403)
     def test_client_state_is_sanitized(self):
@@ -183,6 +183,60 @@ class ClientPortalTests(unittest.TestCase):
         result=self.client.get('/api/portal/operations/'+response.json['operation_id']).json
         self.assertEqual(result['state'],'failed');self.assertIn('arrêté proprement',result['result']['error'])
         self.assertNotIn('infrastructure',result['result']['error'])
+    def test_rescue_password_encrypted_available_only_to_owner_while_active(self):
+        self.login();path='/api/portal/vps/'+self.vm+'/rescue'
+        first=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
+        self.assertEqual(first.status_code,200);password=first.json['password'];self.assertEqual(len(password),12);self.assertRegex(password,r'^[A-Za-z0-9]{12}$');self.assertTrue(any(c.isupper() for c in password) and any(c.islower() for c in password) and any(c.isdigit() for c in password));self.assertFalse(set(password)&set('0O1Il'))
+        self.assertEqual(first.headers['Cache-Control'],'no-store');self.assertEqual(first.json['username'],'rescue')
+        self.assertEqual(self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers).status_code,409)
+        self.assertNotIn(password,self.client.get('/api/portal/state').get_data(as_text=True))
+        self.assertNotIn(password,json.dumps(self.store.rows('SELECT * FROM client_operations')))
+        self.assertNotIn(password,json.dumps(self.store.rows('SELECT * FROM deployments')))
+        self.assertNotIn(password,json.dumps(self.store.rows('SELECT * FROM events')))
+        credentials=self.client.get(path+'/credentials');self.assertEqual(credentials.json['password'],password)
+        self.assertEqual(credentials.headers['Cache-Control'],'no-store')
+        row=self.store.one('SELECT ciphertext FROM rescue_credentials WHERE deployment_id=?',(self.vm,))
+        self.assertNotIn(password.encode(),row['ciphertext']);self.assertEqual(self.store.cipher.decrypt(row['ciphertext']).decode(),password)
+        self.login('b@example.net','CustomerPasswordB123')
+        self.assertEqual(self.client.get(path+'/credentials').status_code,404)
+        self.login()
+        # Re-opening the database preserves the encrypted active password.
+        from virtualwan.store import Store
+        reopened=Store(self.tmp.name)
+        row=reopened.one('SELECT ciphertext FROM rescue_credentials WHERE deployment_id=?',(self.vm,))
+        self.assertEqual(reopened.cipher.decrypt(row['ciphertext']).decode(),password)
+        off=self.client.post(path,json={'confirmation':'CONFIRMER','disable':True},headers=self.headers)
+        self.assertEqual(self.client.get(path+'/credentials').status_code,409)
+        self.assertEqual(self.store.rows('SELECT * FROM rescue_credentials'),[])
+        self.assertNotIn('password',off.json)
+        second=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
+        self.assertNotEqual(second.json['password'],password)
+        # A failed return to disk must not lose the still-active credentials.
+        from unittest.mock import MagicMock
+        backend=MagicMock();backend.__enter__.return_value=backend;backend.rescue.side_effect=domain.Conflict('VM encore en marche.')
+        self.app.config['CLIENT_PVE_FACTORY']=lambda *a:backend;self.control.demo=False;self.control.allow_provision=True
+        self.assertEqual(self.client.post(path,json={'confirmation':'CONFIRMER','disable':True},headers=self.headers).status_code,409)
+        self.assertEqual(self.client.get(path+'/credentials').json['password'],second.json['password'])
+        with self.store.tx() as db:db.execute('DELETE FROM deployments WHERE id=?',(self.vm,))
+        self.assertEqual(self.store.rows('SELECT * FROM rescue_credentials'),[])
+    def test_rescue_credential_cd_attached_and_removed_without_touching_cloudinit(self):
+        from unittest.mock import call
+        pve=ClientPVE(self.store,{}, {'id':self.vm,'vmid':120});pve.node='pve2';pve.config={'digest':'digest','boot':'order=scsi0;ide2'}
+        credential={'volid':'iso:iso/virtualwan-rescue-auth-120-'+('a'*32)+'.iso','session':'a'*32}
+        with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api',return_value=[{'volid':'iso:iso/rescue.iso'}]) as api,patch('virtualwan.adapters.rescue_media.media',return_value=credential) as media:
+            saved=pve.rescue('iso:iso/rescue.iso',password='SyntheticRescuePassword1234567890')
+            self.assertEqual(api.call_args.kwargs['ide1'],credential['volid']+',media=cdrom');self.assertNotIn('ide2',api.call_args.kwargs)
+            pve.config={'digest':'new','boot':'order=ide0;scsi0','ide0':saved['ide0'],'ide1':credential['volid']+',media=cdrom,size=1M'}
+            pve.rescue('',True,saved)
+            self.assertEqual(api.call_args.kwargs,{'delete':'ide0,ide1','digest':'new','boot':'order=scsi0;ide2'})
+            self.assertEqual(media.call_args.args,(pve,'delete'))
+            # Retry after detach but before credential ISO cleanup is idempotent.
+            pve.config={'digest':'last','boot':'order=scsi0;ide2'};api.reset_mock();pve.rescue('',True,saved);api.assert_not_called()
+    def test_rescue_never_overwrites_an_existing_credential_drive(self):
+        pve=ClientPVE(self.store,{},{});pve.config={'ide1':'customer-device'}
+        with patch.object(pve,'status',return_value={'status':'stopped'}),patch('virtualwan.adapters.rescue_media.media') as media:
+            with self.assertRaises(domain.Conflict):pve.rescue('iso:iso/rescue.iso',password='unused')
+            media.assert_not_called()
     def test_rescue_restore_accepts_proxmox_size_annotation(self):
         pve=ClientPVE(self.store,{},{});pve.config={'ide0':'iso:iso/rescue.iso,media=cdrom,size=1024K','digest':'digest'}
         with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api') as api:

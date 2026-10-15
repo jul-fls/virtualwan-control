@@ -8,7 +8,7 @@ import zipfile
 
 ROOT=Path(__file__).parents[1]
 ALLOWED_FILES={'README.md','LICENSE','NOTICE','SECURITY.md','CONTRIBUTING.md','Dockerfile','requirements.txt','requirements.lock','compose.yaml','compose.https.yaml','Caddyfile','.env.example','.gitignore','.dockerignore','pyproject.toml'}
-ALLOWED_DIRS={'virtualwan','examples','docs','tools','tests','.github'}
+ALLOWED_DIRS={'virtualwan','examples','docs','tools','tests','.github','rescue'}
 
 def files():
     for p in sorted(ROOT.rglob('*')):

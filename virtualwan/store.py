@@ -56,6 +56,7 @@ class Store:
                 db.execute('DROP TABLE deployments_old')
             db.execute("CREATE TABLE IF NOT EXISTS client_vms(deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,account_id TEXT NOT NULL REFERENCES accounts(id),display_name TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '')")
             if links:db.executemany('INSERT INTO client_vms VALUES(?,?,?,?)',links)
+            db.execute('CREATE TABLE IF NOT EXISTS rescue_credentials(deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,ciphertext BLOB NOT NULL)')
             db.execute("UPDATE jobs SET state='interrupted',updated_at=? WHERE state='running'",(time.time(),))
             db.execute("UPDATE client_operations SET state='interrupted' WHERE state='running'")
             # Never replay a possibly accepted supplier checkout after a crash.

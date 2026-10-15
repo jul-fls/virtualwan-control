@@ -1,0 +1,14 @@
+[Unit]
+Description=Virtualwan per-activation rescue credentials
+After=live-config.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=virtualwan-rescue.service ssh.service getty@tty1.service serial-getty@ttyS0.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/virtualwan-rescue-auth
+RemainAfterExit=yes
+TimeoutStartSec=30
+StandardOutput=journal+console
+StandardError=journal+console
+[Install]
+WantedBy=multi-user.target

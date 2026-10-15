@@ -17,6 +17,13 @@ from .adapters.client_pve import ClientPVE,GraphicalPreparationError,validate_ru
 from .store import ident
 
 
+def rescue_password():
+    alphabet='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+    while True:
+        value=''.join(secrets.choice(alphabet) for _ in range(12))
+        if any(c.isupper() for c in value) and any(c.islower() for c in value) and any(c.isdigit() for c in value):return value
+
+
 def install_portal(app,store,control,origin):
     accounts=Accounts(store,origin);app.extensions['accounts']=accounts
     locks={};lock_guard=threading.Lock();attempts={}
@@ -40,6 +47,7 @@ def install_portal(app,store,control,origin):
         row['mfa_enabled']=bool(row.pop('totp'));row['passkeys']=store.rows('SELECT id,name,created_at FROM passkeys WHERE account_id=?',(row['id'],))
         return row
     def public_vm(d):
+        d={**d,'rescue_state':bool(d.get('rescue_state'))}
         return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','reverse_dns','rescue_state','memory_mb','cores','disk_gb')}
     def login_response(result):
         if not result:abort(401)
@@ -288,6 +296,15 @@ def install_portal(app,store,control,origin):
             with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps({'error':'La préparation n’a pas pu démarrer. Réessayez.','phase':'checking'}),run))
             raise
         return jsonify(operation_id=run),202
+    @app.get('/api/portal/vps/<key>/rescue/credentials')
+    def rescue_credentials(key):
+        d=owner(key)
+        if not d.get('rescue_state'):raise domain.Conflict('Mode rescue inactif.')
+        rows=store.rows('SELECT ciphertext FROM rescue_credentials WHERE deployment_id=?',(key,))
+        password=store.cipher.decrypt(rows[0]['ciphertext']).decode() if rows else None
+        if password:store.redactions.add(password)
+        response=jsonify(username='rescue',password=password);response.headers['Cache-Control']='no-store'
+        return response
     @app.post('/api/portal/vps/<key>/rescue')
     def rescue(key):
         b=body()
@@ -296,11 +313,17 @@ def install_portal(app,store,control,origin):
             disable=b.get('disable') is True;saved=d.get('rescue_state')
             if disable and not saved:raise domain.Conflict('Mode rescue inactif.')
             if not disable and saved:raise domain.Conflict('Mode rescue déjà actif.')
+            password=None if disable else rescue_password()
+            if password:store.redactions.add(password)
             if control.demo:result=None if disable else {'boot':'order=scsi0','ide0':'demo:iso/rescue.iso,media=cdrom'}
             else:
-                with backend(d) as pve:result=pve.rescue(os.environ.get('VWAN_RESCUE_ISO',''),disable,saved)
-            update_vm(key,rescue_state=None if disable else result)
-        return jsonify(ok=True)
+                with backend(d) as pve:result=pve.rescue(os.environ.get('VWAN_RESCUE_ISO',''),disable,saved,password=password)
+            with store.tx() as db:
+                update_vm(key,rescue_state=None if disable else result)
+                if disable:db.execute('DELETE FROM rescue_credentials WHERE deployment_id=?',(key,))
+                else:db.execute('INSERT OR REPLACE INTO rescue_credentials VALUES(?,?)',(key,store.cipher.encrypt(password.encode())))
+        response=jsonify(ok=True,**({'username':'rescue','password':password} if password else {}));response.headers['Cache-Control']='no-store'
+        return response
     @app.post('/api/portal/vps/<key>/console')
     def console_ticket(key):
         d=owner(key)

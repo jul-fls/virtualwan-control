@@ -1,0 +1,14 @@
+[Unit]
+Description=Virtualwan rescue per-VM network from read-only cloud-init media
+After=virtualwan-rescue-auth.service live-config.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service virtualwan-rescue-auth.service
+Before=ssh.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/virtualwan-rescue-network
+RemainAfterExit=yes
+TimeoutStartSec=90
+StandardOutput=journal+console
+StandardError=journal+console
+[Install]
+WantedBy=multi-user.target

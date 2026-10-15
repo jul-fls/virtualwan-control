@@ -407,3 +407,71 @@ bounds, fullscreen/exit, mobile resizing and close/reopen with the real noVNC
 handshake/renderer. This runs locally against synthetic framebuffer data; it
 does not access production QEMU or change any guest. The previous demo/control
 tests alone could not detect a zero-sized actual framebuffer.
+
+## Shared Debian rescue ISO — 2026-10-15
+
+- Offline Linux suite: **242 tests passed**; the four rescue parsing/validation
+  regressions passed again after the live-boot fixes. They cover MAC-based NIC
+  discovery, public /32 and IPv6 /128 data, rejection of DHCP/invalid DNS/routes,
+  and extraction of plain SSH public keys without executing user-data.
+- Built a Debian 13 amd64 ISO from authenticated Debian repositories, with
+  BusyBox, no desktop, disk/network repair tools and ephemeral SSH host identity.
+  Saved package inventory, build log and SHA-256 locally. Build inputs and an
+  offline boot-test harness are under rescue/.
+- Real local QEMU/KVM boots passed with SeaBIOS and OVMF UEFI (Secure Boot was
+  not exercised): automatic boot, differently named NICs matched by MAC, one
+  public-only IPv4 /32, IPv6 /128, off-subnet IPv4 gateway and IPv6 link-local
+  gateway connectivity. Actual OpenSSH login with a per-test authorized key
+  succeeds as rescue, with sudo; password/root SSH authentication is disabled.
+- A boot without NoCloud media passed: the rescue console/user/tools remain
+  available, networking fails closed and no fallback private IPv4 is assigned.
+- Guest disk remained unmounted and the test user-data command was never run.
+  Live testing caught an IPv6 route being installed with an address still under
+  Duplicate Address Detection; the route now leaves source selection to Linux.
+- Validated image: 358940672 bytes, SHA-256
+  e9d1f182e2cf9c93f6c8cae15eef64ec59301e3244fa6c832b94eb98f14ba9bb.
+
+These boot/network/SSH checks used disposable local QEMU disks and synthetic
+addresses with a restricted user-mode router, not a customer's production disk
+or public Internet path. No client VM was stopped or reconfigured. IPv6 can
+only be restored when its address/gateway are present in that VM's NoCloud
+network-config; legacy IPv4-only seeds retain IPv4-only rescue networking.
+
+Deployment check: the validated ISO was uploaded atomically to the existing
+shared `iso` storage. Its destination SHA-256 matches the local artifact and
+its volume ID is visible through both eligible PVE nodes' storage APIs. Only
+that new ISO file was added; no guest or storage/cluster configuration changed.
+The management container remains operator-deployed; set VWAN_RESCUE_ISO to the
+volume ID documented in rescue/README.md to expose the rescue action.
+
+## Per-activation rescue password and persistent client UI — 2026-10-15
+
+Supersedes the key-only/autologin behavior of the first shared ISO above.
+
+- Offline Linux suite: **246 tests passed**. The credential tests cover the
+  encrypted record, owner-only retrieval, no inventory/journal leak, no-store,
+  restart persistence, rotation, removal, preserved cloud-init media and
+  retry after detaching the extra credential CD.
+- Actual QEMU/KVM BIOS and UEFI boots: public IPv4 /32 and IPv6 /128, both
+  gateways, authorized-key SSH + sudo, 12-character password SSH passed.
+  The previous activation password was rejected. IPv6 checks wait for DAD.
+- No-NoCloud boot: tools and console remain available, no extra IPv4 is
+  assigned. A credential CD may unlock console login without granting networking.
+- The kernel command line disables autologin and serial reaches a login prompt.
+  Neither customer user-data nor disks are executed/mounted automatically.
+- Real Chromium portal journey passed: yellow Rescue badge, masked/revealable
+  password, re-open after page reload, rotation, badge removal, plus existing
+  power/console/fullscreen/windows/firewall/account/passkey/MFA flows; no JS errors.
+- Shared ISO v2 SHA-256:
+  `9c2e3899fa93d3534b5064308905e81f422e92d3b1dcf0b36df66fabb2c9546c`.
+- Verified uploaded SHA-256 and storage API visibility on both pve2 and pve3.
+- Real PVE shared CIFS test created/read/deleted a synthetic credential CD,
+  confirmed the absence of plaintext and the salted SHA-512 hash, repeated
+  deletion successfully, and refused the incompatible v1 image. No customer
+  VM was attached to that test medium.
+
+Application Compose redeployment is performed by the operator. Set
+`VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v2.iso` after updating
+the application image. Existing customer VMs have not been rebooted or switched
+to rescue by these validations. Old configured rescue sessions need a normal
+boot-mode return and new activation to gain per-session credentials.

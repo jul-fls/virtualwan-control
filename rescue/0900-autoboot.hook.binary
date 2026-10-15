@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+for cfg in isolinux/isolinux.cfg boot/isolinux/isolinux.cfg; do
+ if [ -f "$cfg" ]; then printf '\ntimeout 30\nprompt 0\n' >> "$cfg"; fi
+done
+for cfg in boot/grub/grub.cfg EFI/BOOT/grub.cfg; do
+ if [ -f "$cfg" ]; then printf '\nset default=0\nset timeout_style=menu\nset timeout=3\n' >> "$cfg"; fi
+done

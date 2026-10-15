@@ -183,22 +183,38 @@ class ClientPVE:
             if isinstance(error,GraphicalPreparationError):raise
             if configured:raise GraphicalPreparationError('L’affichage VGA est configuré, mais le démarrage n’a pas été confirmé. Vérifiez l’état du VPS et utilisez « Démarrer » si nécessaire.') from error
             raise GraphicalPreparationError('La préparation VGA a été interrompue avant confirmation de la modification. Les détails sont conservés dans le journal de cette opération.') from error
-    def rescue(self,iso,disable=False,saved=None):
+    def rescue(self,iso,disable=False,saved=None,password=None):
+        from .rescue_media import media
         if self.status()['status']!='stopped':raise domain.Conflict('Arrêter la VM avant de changer son démarrage rescue.')
         if disable:
-            current=self.config.get('ide0','')
-            if current.split(',')[0]!=saved['ide0'].split(',')[0] or 'media=cdrom' not in current.split(','):raise domain.Conflict('Le lecteur rescue a changé ; intervention administrateur requise.')
-            params={'delete':'ide0','digest':self.config['digest']}
-            if saved.get('boot'):params['boot']=saved['boot']
-            else:params['delete']+=',boot'
-            self.api('set','/config',**params);return {'ok':True}
+            current=self.config.get('ide0','');auth=saved.get('credential_volid')
+            detached=not current and (not auth or not self.config.get('ide1')) and self.config.get('boot')==saved.get('boot')
+            if not detached:
+                if current.split(',')[0]!=saved['ide0'].split(',')[0] or 'media=cdrom' not in current.split(','):raise domain.Conflict('Le lecteur rescue a changé ; intervention administrateur requise.')
+                if auth and self.config.get('ide1','').split(',')[0]!=auth:raise domain.Conflict('Le média des identifiants a changé ; intervention administrateur requise.')
+                params={'delete':'ide0'+(',ide1' if auth else ''),'digest':self.config['digest']}
+                if saved.get('boot'):params['boot']=saved['boot']
+                else:params['delete']+=',boot'
+                self.api('set','/config',**params)
+            if auth:media(self,'delete',saved=saved)
+            return {'ok':True}
         if not re.fullmatch(r'[A-Za-z0-9_-]+:iso/[A-Za-z0-9_.-]+\.iso',iso):raise domain.Conflict('ISO rescue non configurée par l’administrateur.')
-        if self.config.get('ide0'):raise domain.Conflict('Le lecteur ide0 est occupé ; aucun périphérique existant ne sera remplacé.')
+        if self.config.get('ide0') or self.config.get('ide1'):raise domain.Conflict('Les lecteurs ide0/ide1 sont occupés ; aucun périphérique existant ne sera remplacé.')
+        if not password:raise domain.Conflict('Les identifiants de cette activation doivent être générés par le portail.')
         volumes=self.api('get',f'/nodes/{self.node}/storage/{iso.split(":")[0]}/content',content='iso')
         if not any(v.get('volid')==iso for v in volumes):raise domain.Conflict('ISO rescue absente de ce nœud.')
-        saved={'boot':self.config.get('boot'),'ide0':iso+',media=cdrom'}
-        self.store.event(self.client.get('_operation_run',self.client.get('id') or ident()),'client.rescue.before',boot=saved['boot'],iso=iso)
-        self.api('set','/config',ide0=saved['ide0'],boot='order=ide0;scsi0',digest=self.config['digest']);return saved
+        credential=media(self,'create',iso=iso,password=password)
+        saved={'boot':self.config.get('boot'),'ide0':iso+',media=cdrom','credential_volid':credential['volid'],'credential_session':credential['session']}
+        self.store.event(self.client.get('_operation_run',self.client.get('id') or ident()),'client.rescue.before',saved=saved)
+        try:self.api('set','/config',ide0=saved['ide0'],ide1=credential['volid']+',media=cdrom',boot='order=ide0;scsi0',digest=self.config['digest'])
+        except Exception:
+            # A timed-out API write may have succeeded. Never delete attached media.
+            try:
+                current=self.api('get','/config')
+                if current.get('ide1','').split(',')[0]!=credential['volid']:media(self,'delete',saved=saved)
+            except Exception:pass
+            raise
+        return saved
     def console(self,password):
         if self.status()['status']!='running':raise domain.Conflict('La VM doit être allumée pour ouvrir la console.')
         if self.config.get('vga','std').split(',')[0] in ('serial0','none'):raise domain.Conflict('Préparer la console graphique depuis la fiche du VPS.')
