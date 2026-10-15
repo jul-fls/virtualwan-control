@@ -57,6 +57,14 @@ def create_app(test_config=None):
         if urlparse('http://'+request.host).hostname not in allowed:abort(400)
         if request.method not in ('GET','HEAD','OPTIONS'):origin_check()
         if not request.path.startswith('/api/') or request.path=='/api/login':return
+        if request.path.startswith('/api/portal/'):
+            if request.path in ('/api/portal/login','/api/portal/passkey/login/begin','/api/portal/passkey/login/complete'):return
+            g.client=app.extensions['accounts'].authenticate(request.cookies.get('vwan_client',''))
+            if not g.client:abort(401)
+            if request.method not in ('GET','HEAD'):
+                if not hmac.compare_digest(request.headers.get('X-CSRF-Token',''),g.client['csrf']):abort(403)
+                if not request.is_json:abort(415)
+            return
         rows=store.rows('SELECT * FROM sessions WHERE token=? AND expires>?',(session_id(),time.time()))
         if not rows:abort(401)
         g.session=rows[0]
@@ -68,7 +76,7 @@ def create_app(test_config=None):
     @app.after_request
     def headers(response):
         response.headers.update({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer',
-                                 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+                                 'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' "+('wss://' if secure else 'ws://')+public.netloc+"; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
         if secure:response.headers['Strict-Transport-Security']='max-age=31536000'
         return response
 
@@ -127,7 +135,7 @@ def create_app(test_config=None):
             for job in jobs:job['result']=json.loads(job['result'])
             purchases=[store.document('purchases',r['id']) for r in store.rows('SELECT id FROM purchases ORDER BY created_at DESC LIMIT 100')]
             return jsonify(version=__version__,demo=demo,features={'purchases':control.allow_purchase or demo,'provisioning':control.allow_provision or demo},profiles=profiles,models=models,
-                           ips=store.rows('SELECT * FROM ip_pool ORDER BY profile_id,ip'),deployments=control.deployments(),jobs=jobs,purchases=purchases,secret_names=[r['name'] for r in store.rows('SELECT name FROM secrets')])
+                           accounts=app.extensions['accounts'].list(),assignments=store.rows('SELECT * FROM client_vms'),ips=store.rows('SELECT * FROM ip_pool ORDER BY profile_id,ip'),deployments=control.deployments(),jobs=jobs,purchases=purchases,secret_names=[r['name'] for r in store.rows('SELECT name FROM secrets')])
     @app.post('/api/profiles')
     def profile_create():return jsonify(id=control.add_profile(request.get_json())),201
     @app.put('/api/profiles/<key>')
@@ -250,6 +258,8 @@ def create_app(test_config=None):
         store.event(key,'ssh.host-key.enrolled',target=target,fingerprint=fingerprint,user=g.session['user'])
         return jsonify(saved=True,fingerprint=fingerprint)
 
+    from .portal import install_portal
+    install_portal(app,store,control,url)
     if app.config.get('START_WORKER',True):control.start()
     return app
 

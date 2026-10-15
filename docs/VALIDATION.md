@@ -319,3 +319,36 @@ while overrides implicitly target the sole JSON-declared router, remembering the
 startup target after UI cloning without JSON, and protecting the sole database
 profile. Reapplying the declarative configuration preserves the existing router
 without recreating the deleted test draft. No production changes were made.
+
+## Customer portal and scalar configuration — 2026-10-15 (v0.2.0)
+
+- Full offline Linux suite: **233 tests passed**. After final connection-error
+  redaction and task validation changes, the 26 portal cases passed again.
+- Real loopback HTTP/WebSocket integration passed with a fake SSH byte channel:
+  both directions, exact origin, authentication, one-use grant and active-session
+  revocation. No production SSH/PVE connections were used for this probe.
+- Real Chrome headless customer flow passed: admin account creation/assignment,
+  scoped client listing, display name, power request, reverse and firewall demo,
+  WebAuthn registration/login with a virtual CTAP2 authenticator, TOTP QR rendering,
+  enrollment, recovery-code login, password change/revocation and mobile layout.
+- Existing eight-page administrator smoke test also passed: simulated deployment,
+  IPv6, quotes/options, retirement and deletion. Neither browser test approves a
+  real purchase, and all external requests are blocked by the test harness.
+- Client/admin browser flows passed with read-only container filesystem, dropped
+  Linux capabilities, no-new-privileges and writable ephemeral /data and /tmp.
+  Docker build, healthcheck, dependency consistency, JS syntax/catalogue checks
+  and git whitespace checks passed.
+- Tests cover cross-account API rejection, absence of management data in client
+  payloads/errors, session revocation, TOTP replay/recovery, old DB foreign-key
+  migration, scalar/CSV bootstrap, preservation of UI changes after JSON import,
+  scoped Proxmox API paths, real UPID format, firewall priority/digest refresh,
+  and preservation of administrator rules and rescue boot configuration.
+- noVNC source is vendored unmodified from the verified npm 1.7.0 package with
+  SHA-512 integrity and upstream license texts. FIDO2 is delegated to python-fido2.
+
+Not exercised against production: starting/stopping/resetting an actual customer
+VM, QEMU VNC/guest graphical boot, live firewall effectiveness on tap/fwbr/fwpr,
+rescue media/boot on both nodes, live reverse changes, migration during console,
+and the operator's reverse-proxy WebSocket/TLS path. These remain disposable-VM
+rollout checks listed in docs/PORTAIL-CLIENT.md. The management Docker deployment
+and production databases were not modified from this workstation.

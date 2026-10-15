@@ -1,7 +1,8 @@
 # Security and trust model
 
-This is an infrastructure administrator console, not a customer portal.
-Keep it on a management network or behind an authenticated private tunnel.
+The application includes a private administrator console and a separately authenticated
+customer portal at /client. Restrict administrator routes at the reverse proxy;
+never place client accounts behind an unrestricted administrator session.
 Use HTTPS for remote access. The default Compose publishes localhost only.
 
 ## Secrets
@@ -30,7 +31,7 @@ order. No VM is assigned to an IP guessed from an unrelated concurrent order.
 
 ## Execution
 
-One Waitress process / one job worker; multiple controllers sharing a
+One Uvicorn process / one job worker; multiple controllers sharing a
 firewall are not supported. Do not increase --workers or run replicas.
 Each IP lease is acquired atomically. Failed deployments retain their IP in
 quarantine. Retry keeps the saved VMID; it must refuse foreign/drifted VMs.
@@ -50,21 +51,57 @@ private keys, customer data or full personal firewall snapshots in an issue.
 
 ## HTTP behind a reverse proxy
 
-The application serves HTTP only using Waitress. TLS/certificates are managed
+The application serves HTTP only using Uvicorn. TLS/certificates are managed
 by the operator's Cloudflare Tunnel/Access or Nginx Proxy Manager. Set
 VWAN_PUBLIC_URL to the actual public HTTPS URL and preserve the Host header;
 Secure cookies and origin checks remain enabled. Internal admin authentication
 is retained even behind Cloudflare Access.
 
 Use a long unique VWAN_ADMIN_PASSWORD. Changing it and restarting revokes all
-existing sessions. Environment credentials override vault values; do not publish
+existing administrator sessions. Environment credentials override vault values; do not publish
 .env or Docker inspect output. VWAN_TRUSTED_PROXY optionally trusts the exact
 address of one direct proxy for one X-Forwarded-For hop; wildcards are rejected.
 Otherwise forwarded client headers are ignored. The controller currently has
-one administrator account and no MFA.
+one environment-managed administrator account; customer accounts have TOTP MFA
+and passkeys. Protect administrator access separately with your trusted proxy.
 
 Fresh-router onboarding requires explicit CONFIGURER confirmation and pinned
 SSH host keys. It verifies the OVH service primary, schedules a timed rollback,
 and reconnects before cancelling it. It refuses existing installations and does
 not mark the home's firewall/bridge configuration as ready. Validate this new
 onboarding path on a disposable Debian 13 router before using it in production.
+
+## Client portal boundaries
+
+- Distinct HttpOnly/SameSite session cookies, SQL-backed expiry, CSRF and exact
+  Origin checks. Client cookies never authorize administrator API routes.
+- A client sees only explicitly assigned deployments. Every VM/status/firewall,
+  reverse, rescue and console request checks account ownership server-side.
+- Remote commands use fixed verbs, quoted arguments, pinned SSH keys and the
+  isolation registry: actual VMID, node, MAC, public IPv4 and bridge must match.
+  Existing clients may not modify resource topology, nodes, storage or ISO URLs.
+- Client firewall edits preserve administrator rules and their precedence.
+  They stage disabled rules before replacing the prior client generation. Each
+  edit refreshes the Proxmox digest. The operations are sequential, not a single
+  Proxmox transaction: a failure is audited and requires rereading/retrying.
+  Global/host firewall settings and existing connection states are never reset.
+- Console: local noVNC assets, one-use 60-second grant bound to client session,
+  account and assigned VM; authenticated WebSocket on the same HTTP listener,
+  SSH tunnel to `qm vncproxy`, no public VNC port and no infrastructure login
+  sent to the browser. Sessions/ownership are rechecked every 10 seconds.
+  Limits: two concurrent consoles per account, 32 per process, one-hour cap.
+- Passwords use Werkzeug scrypt hashes. TOTP seeds are Fernet-encrypted, used
+  time steps cannot be replayed, recovery codes are high-entropy one-use hashes.
+  WebAuthn uses python-fido2 with exact RP/origin and user verification required.
+  Security enrollment/removal and password/email changes require reauthentication
+  (password + MFA, or a passkey login within five minutes).
+- Email is a login identifier; this version does not verify mailbox ownership,
+  send invitations or offer public self-registration/password-recovery links.
+  The administrator can reset access after verifying the customer's identity.
+- Rescue is opt-in via a pre-existing administrator-selected storage ISO and
+  requires a stopped VM. It does not download arbitrary images or format disks.
+
+Account data, authenticator credentials and audit logs are private operational
+information. Back up the complete volume before upgrading. The DB is migrated
+at startup; test restoration separately. No claim of hypervisor escape prevention
+is made by this network/control-plane isolation.

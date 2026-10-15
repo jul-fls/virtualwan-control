@@ -30,12 +30,12 @@ class EnvironmentRouterTests(unittest.TestCase):
         with patch.dict(os.environ,{'VWAN_PROFILES_JSON':json.dumps([self.profile])}):
             apply_environment(self.control);apply_environment(self.control)
         self.assertEqual(self.store.document('profiles','router-test')['revision'],1)
-    def test_environment_model_change_updates(self):
+    def test_environment_model_import_does_not_overwrite_database(self):
         model={'id':'small','name':'Small','cores':1,'memory_mb':512,'disk_gb':8}
         with patch.dict(os.environ,{'VWAN_MODELS_JSON':json.dumps([model])}):apply_environment(self.control)
         model['memory_mb']=1024
         with patch.dict(os.environ,{'VWAN_MODELS_JSON':json.dumps([model])}):apply_environment(self.control)
-        self.assertEqual(self.store.document('models','small')['memory_mb'],1024)
+        self.assertEqual(self.store.document('models','small')['memory_mb'],512)
     def test_environment_secret_has_priority(self):
         self.store.secret_set('PROVIDER_SECRET','older-value')
         with patch.dict(os.environ,{'PROVIDER_SECRET':'new-environment-value'}):self.assertEqual(self.store.secret_get('PROVIDER_SECRET'),'new-environment-value')

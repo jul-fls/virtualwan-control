@@ -68,7 +68,7 @@ secrets, et la base + sa clé permettent de les déchiffrer.
 
 ### Une image, un serveur web, une base locale
 
-Compose lance un seul conteneur : l'application Flask, Waitress et SQLite.
+Compose lance un seul conteneur : l'application Flask, Uvicorn et SQLite.
 Aucun Caddy, aucun PostgreSQL, aucun socket Docker. SQLite est dans le volume
 persistant `/data`. Une seule instance de la console doit accéder à ce volume.
 
@@ -109,7 +109,7 @@ et utilisent un cookie HttpOnly/SameSite Strict, Secure si l'URL est HTTPS.
 Les mutations exigent une session et un token CSRF. Huit tentatives en cinq
 minutes déclenchent un blocage temporaire ; cette limitation est locale au
 processus. Changer le compte/mot de passe puis redémarrer révoque les sessions.
-Cette version est une console d'administration mono-compte, sans MFA ni rôles.
+L’administration garde son compte de démarrage. Les comptes clients et leurs sessions sont distincts ; ils disposent de MFA TOTP et de passkeys dans `/client`.
 
 Toute la configuration de démarrage et tous les secrets peuvent être injectés
 par environnement ; `.env` est un exemple de chargement par Compose, pas un
@@ -117,11 +117,13 @@ fichier de configuration obligatoire de l'application.
 
 - `VWAN_ADMIN_USER`, `VWAN_ADMIN_PASSWORD`, `VWAN_PUBLIC_URL`, `VWAN_DATA_DIR`.
 - `VWAN_DEMO`, `VWAN_ENABLE_PROVISIONING`, `VWAN_ENABLE_PURCHASES`.
-- `VWAN_PROFILES_JSON` : tableau des profils, format `examples/profile.json`,
-  chacun avec un `id` stable et unique. Interfaces, API, réseau, SSH, stockages
-  et domaine y sont configurables ; les secrets restent des références `*_env`.
-- `VWAN_MODELS_JSON` : tableau de modèles avec `id`, `name`, `range`, `cores`,
-  `memory_mb`, `disk_gb`, `template`.
+- `VWAN_ROUTER_BOOTSTRAP`, `VWAN_PROFILE_ID` et les variables simples
+  `VWAN_ROUTER_*`, `VWAN_PVE_*`, `VWAN_PFSENSE_*`, `VWAN_GUEST_*`, etc.
+  initialisent un routeur une fois. Tous les champs sont dans `.env.example`.
+- `VWAN_MODEL_BOOTSTRAP`, `VWAN_MODEL_ID`, `VWAN_MODEL_NAME`,
+  `VWAN_MODEL_RANGE`, `VWAN_MODEL_CORES`, `VWAN_MODEL_MEMORY_MB`,
+  `VWAN_MODEL_DISK_GB`, `VWAN_MODEL_TEMPLATE` initialisent un modèle une fois.
+- Les profils et modèles supplémentaires se créent et s’éditent dans l’UI.
 - Les variables référencées par `*_env` contiennent les identifiants OVH,
   Cloudflare, pfSense, PVE et routeurs. **L'environnement a priorité sur le coffre**.
 - `VWAN_TRUSTED_PROXY` et `VWAN_SMTP_*`/`VWAN_APPROVAL_EMAIL` sont facultatifs.
@@ -130,14 +132,24 @@ fichier de configuration obligatoire de l'application.
 Exemple de modèle dans `.env` :
 
 ```dotenv
-VWAN_MODELS_JSON='[{"id":"small","name":"Small","range":"Essentiel","cores":2,"memory_mb":2048,"disk_gb":32,"template":9001}]'
+VWAN_MODEL_BOOTSTRAP=true
+VWAN_MODEL_ID=small
+VWAN_MODEL_NAME=Small
+VWAN_MODEL_RANGE=Essentiel
+VWAN_MODEL_CORES=2
+VWAN_MODEL_MEMORY_MB=2048
+VWAN_MODEL_DISK_GB=32
+VWAN_MODEL_TEMPLATE=9001
 ```
 
-Les définitions d'environnement sont importées au démarrage et réappliquées
-lorsqu'elles changent. Des définitions inchangées conservent les modifications
-faites ensuite dans l'UI. Retirer un objet du JSON ne supprime jamais son
-infrastructure ni son inventaire. La base conserve les opérations et les VM ;
-les configurations et secrets n'ont pas à être remontés en fichiers JSON.
+Les bootstrap scalaires sont importés une fois en base : les modifications
+ultérieures de l’UI sont conservées. Les variables de connexion et IPv6 ciblées
+restent des overrides explicites ; les retirer si l’UI doit gérer aussi ces champs.
+Aucun JSON n’est nécessaire dans les variables d’environnement.
+
+Les anciennes variables `VWAN_PROFILES_JSON` et `VWAN_MODELS_JSON` restent acceptées
+comme **import de compatibilité**, sans écraser un objet existant en base. Pour
+migrer une installation existante, voir [le guide du portail](docs/PORTAIL-CLIENT.md).
 
 ### Publication GitHub Actions
 
@@ -256,7 +268,7 @@ routeur à votre insu lorsque le seuil est atteint.
 
 ## Architecture et périmètre
 
-Flask/Waitress, UI HTML/CSS/JS sans dépendances frontend externes, SQLite,
+Flask/Uvicorn, UI HTML/CSS/JS sans dépendances frontend externes, SQLite,
 un worker de jobs. Utiliser **un seul processus / une seule instance** ; la
 reprise et les verrous ne constituent pas une architecture multi-controller.
 Pas de facturation client, suppression automatique, HA de la console ou portail
@@ -295,7 +307,7 @@ Sources : [limite Additional IP OVH](https://www.ovhcloud.com/fr/vps/vps-ip/),
 [API /me/order](https://eu.api.ovh.com/1.0/me.json),
 [nftables bridge](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering),
 [Cloud-init Proxmox](https://pve.proxmox.com/pve-docs/chapter-qm.html#qm_cloud_init),
-[Waitress](https://flask.palletsprojects.com/en/stable/deploying/waitress/).
+[Uvicorn](https://www.uvicorn.org/).
 
 ## Connexions simples et première clé SSH
 
@@ -491,11 +503,22 @@ même échouée, empêche de le traiter comme un simple brouillon. Les journaux,
 l’historique des devis clos et les secrets partagés sont conservés ; aucun service
 OVH n’est résilié. Un devis non commandé doit d’abord être annulé.
 
-Si le profil est déclaré dans `VWAN_PROFILES_JSON`, le retirer de cette variable
-(et retirer les variables de connexion/IPv6 qui le ciblent), puis redémarrer
-l’application avant sa suppression dans l’UI, pour éviter sa recréation.
+Les profils sont gérés en base, y compris ceux initialement importés depuis un
+ancien JSON. Une suppression de brouillon est mémorisée pour que l’ancien
+bootstrap ne le recrée pas au redémarrage. Les VM/IP et opérations en cours
+restent des motifs de refus.
 
-Les variables de connexion/IPv6 ne protègent que leur profil cible :
-`VWAN_PROFILE_ID`, ou le seul profil déclaré dans `VWAN_PROFILES_JSON` lorsque
-cet identifiant n’est pas renseigné. Elles n’empêchent pas de supprimer un
-brouillon indépendant créé dans l’UI.
+## Espace client intégré
+
+L’URL `/client` ouvre le portail. **Comptes clients** permet de créer/modifier ou
+suspendre un compte et de réinitialiser son authentification après vérification
+d’identité. À la création d’un VPS, choisir son compte ; pour un VPS existant,
+utiliser **Détails → Compte client**. Aucune VM n’est attribuée automatiquement
+par ressemblance de nom ou de référence commerciale.
+
+Le client dispose des commandes d’alimentation, de la console noVNC, du reverse
+IPv4, de règles entrantes Proxmox propres à sa VM, d’un nom/description libres,
+du statut CPU/RAM, de l’historique, du rescue sur ISO administrateur et de la
+sécurité du compte (mot de passe, MFA avec QR/codes de secours, passkeys, sessions).
+
+Voir [mise en place et migration](docs/PORTAIL-CLIENT.md) et [modèle de sécurité](SECURITY.md).

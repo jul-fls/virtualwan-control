@@ -65,17 +65,6 @@ class Control:
         with self.store.tx() as db:
             p=self.store.document('profiles',key)
             if p['ready']:raise domain.Conflict('Suppression réservée à un profil jamais déployé et non marqué prêt.')
-            declared=json.loads(os.environ.get('VWAN_PROFILES_JSON') or '[]')
-            from .environment import OVERRIDES
-            overrides=any(os.environ.get(name,'').strip() for name in OVERRIDES)
-            target=os.environ.get('VWAN_PROFILE_ID','').strip() or self.environment_profile_id
-            if overrides and not target:
-                # Match startup selection: explicit JSON takes precedence over UI profiles.
-                candidates=declared or [dict(row) for row in db.execute('SELECT id FROM profiles')]
-                if len(candidates)==1:target=candidates[0]['id']
-                else:raise domain.Conflict('Préciser VWAN_PROFILE_ID pour cibler les variables de connexion/IPv6, puis redémarrer l’application.')
-            if any(item.get('id')==key for item in declared) or (overrides and target==key):
-                raise domain.Conflict('Retirer d’abord ce profil de VWAN_PROFILES_JSON et ses variables de connexion/IPv6 ciblées, puis redémarrer l’application avant de le supprimer.')
             if db.execute('SELECT 1 FROM deployments WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des VM clientes.')
             if db.execute('SELECT 1 FROM ip_pool WHERE profile_id=?',(key,)).fetchone():raise domain.Conflict('Ce profil possède encore des IP en inventaire.')
             for row in db.execute('SELECT state,data FROM purchases WHERE profile_id=?',(key,)):
@@ -89,6 +78,7 @@ class Control:
                 if row['kind'] not in ('sync','inspect','quote','delivery') and not payload.get('simulated'):
                     raise domain.Conflict('Une configuration distante a pu être appliquée. Ce profil ne peut pas être supprimé comme un simple test non déployé.')
             self.store.event(key,'profile.deleted',name=p['name'],profile_id=key,remote_changes=False)
+            db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('environment:deleted:profile:'+key,str(time.time())))
             db.execute('DELETE FROM profiles WHERE id=?',(key,))
             db.execute('DELETE FROM settings WHERE name=?',('environment:profile:'+key,))
         return {'ok':True,'remote_changes':False}
@@ -204,7 +194,11 @@ class Control:
                 payload['config']=config;db.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(payload),job))
                 self.store.redactions.add(body['password'])
             db.execute("UPDATE ip_pool SET state='reserved',job_id=? WHERE ip=?",(job,ip))
-            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(ident(),ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
+            deployment=ident()
+            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(deployment,ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
+            if body.get('account_id'):
+                if not db.execute('SELECT 1 FROM accounts WHERE id=? AND enabled=1',(body['account_id'],)).fetchone():raise ValueError('Compte client introuvable ou suspendu.')
+                db.execute('INSERT INTO client_vms(deployment_id,account_id) VALUES(?,?)',(deployment,body['account_id']))
         self.store.event(job,'deployment.requested',public_ip=ip,profile_id=profile['id'],model=model,customer=customer,simulated=self.demo)
         return job
 
@@ -441,6 +435,7 @@ class Control:
         with self.store.tx() as db:
             row=db.execute('SELECT * FROM deployments WHERE id=?',(key,)).fetchone()
             if not row:raise KeyError(key)
+            if db.execute("SELECT 1 FROM client_operations WHERE deployment_id=? AND state='running'",(key,)).fetchone():raise domain.Conflict('Une opération cliente est en cours sur cette VM.')
             client={**json.loads(row['data']),**{k:row[k] for k in ('id','ip','profile_id','model_id')}}
             if not client.get('vmid') or not client.get('mac') or not client.get('next_hop'):raise domain.Conflict('Identité VM incomplète : lire les VM avant suppression.')
             if client['status'] not in ('active','stopped','imported','simulated','detached'):raise domain.Conflict('VM en cours de modification ; vérifier le journal.')

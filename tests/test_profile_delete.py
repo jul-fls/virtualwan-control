@@ -64,33 +64,12 @@ class ProfileDeleteTests(unittest.TestCase):
                 self.job(kind,state)
                 with self.assertRaises(domain.Conflict):self.remove()
                 with self.store.tx() as db:db.execute('DELETE FROM jobs')
-    def test_environment_profile_refused_until_removed(self):
+    def test_imported_profile_is_database_owned(self):
         os.environ['VWAN_PROFILES_JSON']=json.dumps([dict(self.p,id=self.key)])
-        with self.assertRaisesRegex(domain.Conflict,'VWAN_PROFILES_JSON'):self.remove()
-        os.environ.pop('VWAN_PROFILES_JSON');self.remove()
-    def test_targeted_environment_overrides_refused(self):
-        os.environ.update(VWAN_PROFILE_ID=self.key,VWAN_PVE_HOST='192.0.2.10')
-        with self.assertRaisesRegex(domain.Conflict,'variables'):self.remove()
-        os.environ['VWAN_PROFILE_ID']='another-profile';self.remove()
-    def test_implicit_overrides_for_declared_router_allow_ui_draft_deletion(self):
-        from virtualwan.environment import apply_environment
-        existing=self.control.clone_profile(self.key,'Existing router','10.254.249.0/24','10.254.249.1')
-        os.environ.update(VWAN_PROFILES_JSON=json.dumps([self.store.document('profiles',existing)]),VWAN_PVE_HOST='192.0.2.10')
-        apply_environment(self.control)
         self.remove()
-        self.assertEqual(self.store.document('profiles',existing)['config']['pve']['host'],'192.0.2.10')
-        apply_environment(self.control)
-        self.assertEqual([r['id'] for r in self.store.rows('SELECT id FROM profiles')],[existing])
-        with self.assertRaises(domain.Conflict):self.control.delete_profile(existing,'SUPPRIMER')
-    def test_implicit_database_target_remembered_after_ui_clone(self):
-        from virtualwan.environment import apply_environment
-        os.environ['VWAN_PVE_HOST']='192.0.2.10';apply_environment(self.control)
-        draft=self.control.clone_profile(self.key,'Disposable','10.254.249.0/24','10.254.249.1')
-        self.control.delete_profile(draft,'SUPPRIMER')
-        with self.assertRaises(domain.Conflict):self.remove()
-    def test_implicit_overrides_protect_sole_database_profile(self):
-        os.environ['VWAN_PVE_HOST']='192.0.2.10'
-        with self.assertRaisesRegex(domain.Conflict,'variables'):self.remove()
+    def test_ordinary_environment_overrides_do_not_lock_ui_drafts(self):
+        os.environ.update(VWAN_PROFILE_ID='existing-router',VWAN_PVE_HOST='192.0.2.10')
+        self.remove()
     def test_late_job_cannot_reference_deleted_draft(self):
         self.remove()
         with self.assertRaises(KeyError):self.store.job('sync',{'profile_id':self.key})

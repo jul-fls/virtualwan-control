@@ -35,16 +35,29 @@ class Store:
             CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,csrf TEXT NOT NULL,expires REAL NOT NULL,user TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,time REAL NOT NULL,action TEXT NOT NULL,data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,name TEXT NOT NULL,password_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,totp BLOB,last_totp INTEGER NOT NULL DEFAULT -1,recovery TEXT NOT NULL DEFAULT '[]',created_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS client_sessions(token TEXT PRIMARY KEY,csrf TEXT NOT NULL,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,expires REAL NOT NULL,authenticated_at REAL NOT NULL,method TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS client_challenges(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,purpose TEXT NOT NULL,data TEXT NOT NULL,expires REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS passkeys(id TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,name TEXT NOT NULL,credential TEXT NOT NULL,sign_count INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS client_operations(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,deployment_id TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL,result TEXT NOT NULL,created_at REAL NOT NULL);
+
             ''')
             # executescript ends the initial transaction; migrate atomically.
             if not db.in_transaction:db.execute('BEGIN IMMEDIATE')
+            links=[]
             # SQLite cannot drop NOT NULL in place. Preserve all existing records.
             if any(c['name']=='ip' and c['notnull'] for c in db.execute('PRAGMA table_info(deployments)')):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='client_vms'").fetchone():
+                    links=[tuple(r) for r in db.execute('SELECT * FROM client_vms')]
+                    db.execute('DROP TABLE client_vms')
                 db.execute('ALTER TABLE deployments RENAME TO deployments_old')
                 db.execute('CREATE TABLE deployments(id TEXT PRIMARY KEY,ip TEXT UNIQUE,profile_id TEXT NOT NULL,model_id TEXT,data TEXT NOT NULL)')
                 db.execute('INSERT INTO deployments SELECT * FROM deployments_old')
                 db.execute('DROP TABLE deployments_old')
+            db.execute("CREATE TABLE IF NOT EXISTS client_vms(deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,account_id TEXT NOT NULL REFERENCES accounts(id),display_name TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '')")
+            if links:db.executemany('INSERT INTO client_vms VALUES(?,?,?,?)',links)
             db.execute("UPDATE jobs SET state='interrupted',updated_at=? WHERE state='running'",(time.time(),))
+            db.execute("UPDATE client_operations SET state='interrupted' WHERE state='running'")
             # Never replay a possibly accepted supplier checkout after a crash.
             db.execute("UPDATE purchases SET state='uncertain' WHERE state='checking_out'")
 

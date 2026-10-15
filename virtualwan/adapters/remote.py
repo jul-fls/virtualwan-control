@@ -436,7 +436,9 @@ def main():
             user['hashed_passwd'] = run('openssl', 'passwd', '-6', '-stdin', input=q['guest_password'] + '\n').strip()
         user_data = {'users': [user], 'disable_root': True, 'ssh_pwauth': auth in ('password', 'both'), 'chpasswd': {'expire': False}, 'fqdn': q['fqdn'], 'hostname': q['fqdn'], 'prefer_fqdn_over_hostname': True}
         network=ipv6_network_data(g,q['ip'],mac,q.get('ipv6'))
-        if q.get('ipv6'):user_data['write_files']=ipv6_cloud_files(g['interface'])
+        user_data['write_files']=[{'path':'/etc/default/grub.d/99-virtualwan-console.cfg','permissions':'0644','content':'GRUB_TERMINAL=console\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} console=tty0"\n'}]
+        user_data['runcmd']=[['sh','-c','command -v update-grub >/dev/null && update-grub || true'],['systemctl','enable','--now','getty@tty1.service']]
+        if q.get('ipv6'):user_data['write_files']+=ipv6_cloud_files(g['interface'])
         refs = []
         for suffix, data in (('network', json.dumps(network, indent=2)), ('user', '#cloud-config\n' + json.dumps(user_data, indent=2))):
             name = f'virtualwan-{vmid}-{suffix}.yaml'
@@ -446,6 +448,8 @@ def main():
             audit('snippet.create.end', path=str(Path(p['snippet_directory']) / name))
             refs.append(f'{suffix}={p["snippet_storage"]}:snippets/{name}')
         run('qm', 'set', vmid, '--net0', f'virtio={mac},bridge={p["bridge"]}', '--cores', str(p['cores']), '--memory', str(p['memory_mb']), '--ciuser', g['username'], '--tags', 'linux;virtualwan', '--cicustom', ','.join(refs))
+        run('qm','set',vmid,'--vga','std')
+        if 'serial0' in cfg:run('qm','set',vmid,'--delete','serial0')
         run('qm', 'resize', vmid, 'scsi0', str(p['disk_gb']) + 'G')
         run('qm', 'cloudinit', 'update', vmid)
         register_isolation(p,q,vmid,mac)

@@ -59,3 +59,17 @@ private key or install an HTTP server in every clone.
 Sources: [Debian cloud images](https://cloud.debian.org/images/cloud/),
 [Proxmox Cloud-init](https://pve.proxmox.com/pve-docs/chapter-qm.html#qm_cloud_init),
 [cloud-init ENI renderer](https://github.com/canonical/cloud-init/blob/main/cloudinit/net/eni.py).
+
+## Graphical console for the client portal
+
+New clones are configured with `vga: std` and their inherited `serial0` device
+removed while stopped. Cloud-init configures the Debian GRUB console for tty0
+and enables `getty@tty1`, so noVNC has a local login prompt. No guest password is
+created for SSH-key-only customers: they may set their own local console password
+through SSH if needed. The console can still access boot/rescue screens.
+
+An already deployed serial-only VM is not silently stopped or reconfigured by
+upgrading the controller. From its own console/SSH, ensure `getty@tty1` is enabled
+and GRUB supports tty0, then stop the VM, select Prepare graphical console in
+the client portal, and start it again. This removes serial0 and selects std VGA.
+Test this on a disposable clone before converting a general-purpose template.

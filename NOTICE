@@ -10,3 +10,8 @@ CLI project and have been modified for generic configuration, a private
 control panel, procurement approvals and multiple routing segments.
 Third-party dependencies retain their own licenses; they are installed from
 their distributions and are not relicensed by this NOTICE.
+
+The unmodified noVNC 1.7.0 client is bundled in virtualwan/static/novnc.
+It retains its MPL-2.0 license and third-party BSD/MIT notices. Source,
+AUTHORS, LICENSE.txt and upstream license texts are included alongside it.
+See virtualwan/static/novnc/SOURCE.json for the verified package integrity.

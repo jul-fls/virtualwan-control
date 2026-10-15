@@ -1,0 +1,6 @@
+{
+  "package": "@novnc/novnc",
+  "version": "1.7.0",
+  "integrity": "sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==",
+  "source": "https://github.com/novnc/noVNC"
+}

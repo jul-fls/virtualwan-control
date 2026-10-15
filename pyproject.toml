@@ -1,7 +1,7 @@
 [project]
 name = "virtualwan-control"
-version = "0.1.0"
-description = "Private control plane for routed public-IP VMs and human-approved cloud procurement"
+version = "0.2.0"
+description = "Routed public-IP VPS control plane, customer portal and human-approved cloud procurement"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 readme = "README.md"
