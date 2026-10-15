@@ -392,3 +392,18 @@ A real Debian clone's package installation/VT keymap after first boot and typed
 characters in QEMU still require rollout validation. Custom keymaps, IMEs and
 nonstandard dead-key combinations should use matching local/guest keymaps in
 physical mode. This update does not rewrite existing guests' keyboard config.
+
+## Embedded noVNC canvas sizing regression — 2026-10-15
+
+Reproduced with the real vendored noVNC renderer and a synthetic RFB 3.8 server:
+a framebuffer update painted a red test rectangle into the canvas, but its DOM
+size was **0 × 0** inside the customer modal. The flex container had no definite
+height, so noVNC's inner percentage height collapsed and viewport scaling became
+zero. Giving the workspace a definite height and the framebuffer a shrinkable
+flex slot restores the visible canvas (about 809 × 606 at 1480 × 1050).
+
+The browser regression verifies decoded pixel content plus nonzero visible canvas
+bounds, fullscreen/exit, mobile resizing and close/reopen with the real noVNC
+handshake/renderer. This runs locally against synthetic framebuffer data; it
+does not access production QEMU or change any guest. The previous demo/control
+tests alone could not detect a zero-sized actual framebuffer.
