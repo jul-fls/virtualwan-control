@@ -52,8 +52,9 @@ class ClientPVE:
             raw=self.command(args)
             # pvesh config updates may print a progress line instead of JSON.
             # Only accept the known notification on a successful config mutation.
-            if method=='set' and suffix=='/config':
-                raw=re.sub(r'^update VM '+str(int(self.client['vmid']))+r':[^\n]*(?:\n|$)','',raw)
+            if method=='set' and suffix=='/config' and raw.startswith('update VM '+str(int(self.client['vmid']))+':'):
+                # Description values can contain newlines in this notification.
+                raw=''
             try:result=json.loads(raw) if raw.strip() else None
             except json.JSONDecodeError:
                 # Forked PVE workers can inherit stdout and precede their JSON
@@ -287,6 +288,64 @@ class ClientPVE:
         checkpoint(saved,True)
         if old:media(self,'delete',saved=old)
         return saved
+    def set_notes(self,text):
+        self.config=self.api('get','/config')
+        self.api('set','/config',description=text,digest=self.config['digest'])
+        self.config=self.api('get','/config')
+        if self.config.get('description')!=text:raise domain.Conflict('Les notes Proxmox n’ont pas été confirmées.')
+    def set_network(self,blocked):
+        if not isinstance(blocked,bool):raise ValueError('État réseau invalide.')
+        net=re.sub(r',link_down=[01](?=,|$)','',self.config['net0'])+(',link_down=1' if blocked else '')
+        self.api('set','/config',net0=net,digest=self.config['digest']);self.config=self.api('get','/config')
+        if ('link_down=1' in self.config.get('net0',''))!=blocked:raise domain.Conflict('La suspension réseau n’a pas été confirmée.')
+    def set_onboot(self,enabled):
+        if not isinstance(enabled,bool):raise ValueError('État de démarrage invalide.')
+        self.api('set','/config',onboot=enabled,digest=self.config['digest']);self.config=self.api('get','/config')
+        if bool(self.config.get('onboot'))!=enabled:raise domain.Conflict('Le démarrage automatique n’a pas été confirmé.')
+    def hardware(self):
+        disk=self.system_boot(self.config)
+        disk=disk.removeprefix('order=').split(';')[0] if disk else None
+        value=self.config.get(disk,'') if disk else ''
+        size=re.search(r'(?:^|,)size=([0-9.]+)([KMGT]?)(?:,|$)',value)
+        if not disk or not size:raise domain.Conflict('Le disque système doit avoir une taille vérifiable dans Proxmox.')
+        import math
+        gb=float(size.group(1))*{'':1/(1024**3),'K':1/(1024**2),'M':1/1024,'G':1,'T':1024}[size.group(2)]
+        return {'cores':int(self.config.get('cores',1))*int(self.config.get('sockets',1)),'memory_mb':int(self.config.get('memory',512)),'disk_gb':math.ceil(gb),'disk':disk,'onboot':bool(self.config.get('onboot')),'network_suspended':'link_down=1' in self.config.get('net0','')}
+    def resize(self,model,pending=None,progress=lambda *a:None,checkpoint=lambda *a:None):
+        target=domain.model(model);actual=self.hardware();pending=dict(pending or {})
+        current=self.status()['status']
+        if current not in ('running','stopped'):raise domain.Conflict('Le VPS est occupé ou suspendu.')
+        if not pending:
+            pending={'was_running':current=='running','model':target,'disk_gb':max(actual['disk_gb'],target['disk_gb'])}
+            checkpoint(pending,False)
+        elif pending['model']!=target:raise domain.Conflict('Reprendre le changement de gamme déjà commencé.')
+        wanted=pending['disk_gb']
+        if wanted>actual['disk_gb']:
+            storage=self.config[actual['disk']].split(':',1)[0]
+            space=self.api('get',f'/nodes/{self.node}/storage/{storage}/status')
+            if int(space.get('avail',0))<(wanted-actual['disk_gb'])*1024**3:raise domain.Conflict('Le stockage ne dispose pas de la capacité libre nécessaire à cette extension.')
+        if current=='running':
+            progress('shutdown','Arrêt du VPS avant changement de gamme…')
+            self.wait_task(self.api('create','/status/shutdown',timeout=60,forceStop=1),80,'Arrêt du VPS non confirmé.')
+            self.wait_power('stopped',15,'Arrêt du VPS non confirmé.')
+        self.check_identity()
+        if self.status()['status']!='stopped':raise domain.Conflict('Le VPS a été rallumé pendant le changement.')
+        progress('configuring','Application des vCPU et de la mémoire…')
+        self.api('set','/config',cores=target['cores'],sockets=1,memory=target['memory_mb'],balloon=0,digest=self.config['digest'])
+        self.config=self.api('get','/config');actual=self.hardware()
+        if actual['disk_gb']<wanted:
+            progress('disk','Extension du disque virtuel…')
+            # Resize is a scoped, validated pvesh mutation; verify the new size.
+            raw=self.command(['pvesh','set',self.base+'/resize','--disk',actual['disk'],'--size',str(wanted)+'G','--output-format','json'])
+            self.store.event(self.client.get('_operation_run',ident()),'admin.resize.disk.output',message=raw)
+            self.config=self.api('get','/config');actual=self.hardware()
+        if actual['cores']!=target['cores'] or actual['memory_mb']!=target['memory_mb'] or actual['disk_gb']<wanted:raise domain.Conflict('La nouvelle configuration matérielle n’a pas été confirmée.')
+        checkpoint({**pending,**actual},True)
+        if pending['was_running']:
+            progress('starting','Redémarrage du VPS avec sa nouvelle gamme…')
+            self.wait_task(self.api('create','/status/start'),90,'Nouvelle gamme appliquée ; démarrage non confirmé. Réessayez.')
+            self.wait_power('running',30,'Nouvelle gamme appliquée ; démarrage non confirmé. Réessayez.')
+        return actual
     def console(self,password):
         if self.status()['status']!='running':raise domain.Conflict('La VM doit être allumée pour ouvrir la console.')
         if self.config.get('vga','std').split(',')[0] in ('serial0','none'):raise domain.Conflict('Préparer la console graphique depuis la fiche du VPS.')

@@ -209,6 +209,7 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual(self.client.get(path+'/credentials').status_code,409)
         self.assertEqual(self.store.rows('SELECT * FROM rescue_credentials'),[])
         self.assertNotIn('password',off.json)
+        self.assertTrue(self.client.get('/api/portal/operations/'+off.json['operation_id']).json['result']['disable'])
         second=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
         second_password=self.client.get(path+'/credentials').json['password'];self.assertNotEqual(second_password,password)
         # A failed return to disk must not lose the still-active credentials.

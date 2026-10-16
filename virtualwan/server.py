@@ -1,5 +1,6 @@
 """One HTTP/WS listener; TLS remains the operator's reverse proxy responsibility."""
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
@@ -28,12 +29,17 @@ class Application:
         from http.cookies import SimpleCookie
         headers={k.decode().lower():v.decode() for k,v in scope['headers']}
         origin=os.environ.get('VWAN_PUBLIC_URL','http://localhost:8080').rstrip('/')
-        if scope['path']!='/ws/console' or headers.get('origin')!=origin or urlparse('http://'+headers.get('host','')).hostname!=urlparse(origin).hostname:
+        if scope['path'] not in ('/ws/console','/ws/admin-console') or headers.get('origin')!=origin or urlparse('http://'+headers.get('host','')).hostname!=urlparse(origin).hostname:
             await send({'type':'websocket.close','code':1008});return
         cookies=SimpleCookie();cookies.load(headers.get('cookie',''))
-        token=cookies['vwan_client'].value if 'vwan_client' in cookies else ''
+        admin=scope['path']=='/ws/admin-console'
+        token=cookies['vwan_session' if admin else 'vwan_client'].value if ('vwan_session' if admin else 'vwan_client') in cookies else ''
         accounts=self.app.extensions['accounts'];store=self.app.extensions['store'];control=self.app.extensions['control']
-        session=await asyncio.to_thread(accounts.authenticate,token)
+        def authenticate():
+            if not admin:return accounts.authenticate(token)
+            rows=store.rows('SELECT * FROM sessions WHERE token=? AND expires>?',(hashlib.sha256(token.encode()).hexdigest(),time.time()))
+            return {**rows[0],'account_id':'admin:'+rows[0]['user']} if rows else None
+        session=await asyncio.to_thread(authenticate)
         if not session or self.active>=32 or self.by_account.get(session['account_id'],0)>=2:
             await send({'type':'websocket.close','code':1008});return
         if not control.demo and not control.allow_provision:
@@ -44,11 +50,11 @@ class Application:
             event=await asyncio.wait_for(receive(),10)
             if event['type']!='websocket.receive' or len(event.get('text',''))>2048:raise ValueError('Authentication required')
             handshake=json.loads(event['text']);account,data=await asyncio.to_thread(accounts.consume,handshake['ticket'],'console',session['account_id'])
-            if data['session']!=session['token']:raise ValueError('Wrong session')
-            rows=store.rows('SELECT d.* FROM deployments d JOIN client_vms v ON v.deployment_id=d.id WHERE d.id=? AND v.account_id=?',(data['deployment_id'],account))
+            if data['session']!=session['token'] or bool(data.get('admin'))!=admin:raise ValueError('Wrong session')
+            rows=store.rows('SELECT * FROM deployments WHERE id=?',(data['deployment_id'],)) if admin else store.rows('SELECT d.* FROM deployments d JOIN client_vms v ON v.deployment_id=d.id WHERE d.id=? AND v.account_id=?',(data['deployment_id'],account))
             if not rows:raise ValueError('Ownership changed')
             row=rows[0];client={**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}}
-            if client.get('status') not in ('active','stopped','imported','simulated'):raise ValueError('Unavailable')
+            if (not admin and client.get('management_locked')) or client.get('status') not in ('active','stopped','imported','simulated'):raise ValueError('Unavailable')
             if self.active>=32 or self.by_account.get(account,0)>=2:raise ValueError('Console limit reached')
             self.active+=1;self.by_account[account]=self.by_account.get(account,0)+1;counted=True
             trace=ident();client['_operation_run']=trace;store.redactions.add(data['password'])
@@ -78,9 +84,9 @@ class Application:
                 started=time.monotonic()
                 while time.monotonic()-started<3600:
                     await asyncio.sleep(self.app.config.get('CONSOLE_CHECK_INTERVAL',10))
-                    live=await asyncio.to_thread(accounts.authenticate,token)
-                    owner=store.rows('SELECT d.data FROM client_vms v JOIN deployments d ON d.id=v.deployment_id WHERE v.deployment_id=? AND v.account_id=?',(client['id'],account))
-                    if owner and json.loads(owner[0]['data']).get('status') not in ('active','stopped','imported','simulated'):return
+                    live=await asyncio.to_thread(authenticate)
+                    owner=store.rows('SELECT data FROM deployments WHERE id=?',(client['id'],)) if admin else store.rows('SELECT d.data FROM client_vms v JOIN deployments d ON d.id=v.deployment_id WHERE v.deployment_id=? AND v.account_id=?',(client['id'],account))
+                    if owner and ((not admin and json.loads(owner[0]['data']).get('management_locked')) or json.loads(owner[0]['data']).get('status') not in ('active','stopped','imported','simulated')):return
                     if not live or not owner:return
             tasks=[asyncio.create_task(c()) for c in (incoming,outgoing,expiry)]
             done,_=await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)

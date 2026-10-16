@@ -72,9 +72,24 @@ class ConsoleWebSocketTests(unittest.TestCase):
                             async with connect(f'ws://localhost:{port}/ws/console',origin=origin,additional_headers={'Cookie':cookie}) as duplicate:
                                 await duplicate.send(json.dumps({'ticket':ticket['ticket']}))
                                 with self.assertRaises(ConnectionClosed):await asyncio.wait_for(duplicate.recv(),3)
-                            with store.tx() as db:db.execute('DELETE FROM client_sessions WHERE account_id=?',(account,))
+                            with store.tx() as db:
+                                row=db.execute('SELECT data FROM deployments WHERE id=?',('testvm',)).fetchone();data=json.loads(row['data']);data['management_locked']=True;db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(data),'testvm'))
                             with self.assertRaises(ConnectionClosed):await asyncio.wait_for(ws.recv(),3)
                     asyncio.run(exercise())
+                    admin=requests.Session();r=admin.post(origin+'/api/login',json={'username':'admin','password':'AdminPasswordForTests123'},timeout=5)
+                    self.assertEqual(r.status_code,200);admincsrf=r.json()['csrf'];adminticket=admin.post(origin+'/api/admin/vps/testvm/console',json={},headers={'X-CSRF-Token':admincsrf},timeout=5).json()
+                    admincookie='vwan_session='+admin.cookies.get('vwan_session')
+                    async def admin_exercise():
+                        with self.assertRaises(InvalidStatus):
+                            async with connect(f'ws://localhost:{port}/ws/admin-console',origin=origin,additional_headers={'Cookie':cookie}):pass
+                        with self.assertRaises(InvalidStatus):
+                            async with connect(f'ws://localhost:{port}/ws/console',origin=origin,additional_headers={'Cookie':admincookie}):pass
+                        async with connect(f'ws://localhost:{port}/ws/admin-console',origin=origin,additional_headers={'Cookie':admincookie}) as ws:
+                            await ws.send(json.dumps({'ticket':adminticket['ticket']}));self.assertEqual(await asyncio.wait_for(ws.recv(),3),b'RFB 003.008\n')
+                            await ws.send(b'admin-console');self.assertEqual(await asyncio.wait_for(ws.recv(),3),b'admin-console')
+                            with store.tx() as db:db.execute('DELETE FROM sessions')
+                            with self.assertRaises(ConnectionClosed):await asyncio.wait_for(ws.recv(),3)
+                    asyncio.run(admin_exercise())
                 finally:
                     server.should_exit=True;thread.join(timeout=5);sock.close()
                 self.assertFalse(thread.is_alive())

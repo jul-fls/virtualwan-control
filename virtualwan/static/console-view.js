@@ -5,11 +5,11 @@ const modifiers={ctrl:[0xffe3,'ControlLeft','Ctrl'],alt:[0xffe9,'AltLeft','Alt']
 const keys={tab:[0xff09,'Tab'],esc:[0xff1b,'Escape']};
 
 export class ConsoleView{
-    constructor(container,{vm,api,onDetach=()=>{},RFBClass=RFB,createSocket=url=>new WebSocket(url)}={}){
-        this.container=container;this.vm=vm;this.api=api;this.onDetach=onDetach;this.RFBClass=RFBClass;this.createSocket=createSocket;this.held=new Set();this.layout='fr';try{const saved=localStorage.getItem('vwan.console.layout.'+vm.id);if(Object.hasOwn(layouts,saved))this.layout=saved;}catch{}this.keyboard=null;this.rfb=null;this.socket=null;this.connected=false;this.disposed=false;
+    constructor(container,{vm,api,onDetach=()=>{},admin=false,RFBClass=RFB,createSocket=url=>new WebSocket(url)}={}){
+        this.container=container;this.vm=vm;this.admin=admin;this.api=api;this.onDetach=onDetach;this.RFBClass=RFBClass;this.createSocket=createSocket;this.held=new Set();this.layout='fr';try{const saved=localStorage.getItem('vwan.console.layout.'+vm.id);if(Object.hasOwn(layouts,saved))this.layout=saved;}catch{}this.keyboard=null;this.rfb=null;this.socket=null;this.connected=false;this.disposed=false;
         this.blur=()=>this.releaseModifiers();this.visibility=()=>{if(document.hidden)this.releaseModifiers();};this.fullscreen=()=>this.updateFullscreen();
         window.addEventListener('blur',this.blur);document.addEventListener('visibilitychange',this.visibility);document.addEventListener('fullscreenchange',this.fullscreen);
-        const href='/client/console/'+encodeURIComponent(vm.id);
+        const href=(this.admin?'/admin/console/':'/client/console/')+encodeURIComponent(vm.id);
         container.innerHTML=`<section class="console-workspace"><div class="console-toolbar" role="toolbar" aria-label="Contrôles de la console"><div class="console-key-controls">${Object.entries(modifiers).map(([id,[,,name]])=>`<button type="button" data-console="modifier" data-key="${id}" aria-pressed="false" title="Maintenir ${name} jusqu’au prochain clic" disabled>${name}</button>`).join('')}<button type="button" data-console="key" data-key="tab" disabled>Tab</button><button type="button" data-console="key" data-key="esc" disabled>Esc</button><button type="button" data-console="cad" disabled>Ctrl + Alt + Suppr</button><button type="button" data-console="release" disabled>Relâcher les touches</button></div><div class="console-window-controls"><label class="console-layout">Clavier du VPS<select data-console-layout aria-label="Disposition du clavier du VPS">${Object.entries(layouts).map(([id,name])=>`<option value="${id}" ${this.layout===id?'selected':''}>${name}</option>`).join('')}</select></label><button type="button" data-console="fullscreen">Plein écran</button><a class="contract-link" data-console="tab" href="${esc(href)}" target="_blank" rel="noopener noreferrer">Nouvel onglet ↗</a><button type="button" data-console="window">Nouvelle fenêtre ↗</button></div></div><div class="console-meta"><span data-console-status role="status">Connexion…</span><span data-console-held aria-live="polite">Aucune touche maintenue</span></div><div class="console-screen" data-console-screen></div><p class="console-help">Ctrl, Alt et Windows restent maintenues jusqu’au prochain clic. Les touches sont relâchées en quittant la fenêtre ou la console. Choisissez la disposition configurée dans le VPS : pour une ancienne VM en QWERTY, sélectionnez Anglais US, même si votre clavier est AZERTY.</p></section>`;
         this.workspace=container.querySelector('.console-workspace');this.screen=container.querySelector('[data-console-screen]');
         this.click=e=>this.handleClick(e);container.addEventListener('click',this.click);
@@ -51,7 +51,7 @@ export class ConsoleView{
             }
             if(action==='tab'){this.releaseModifiers();this.disconnect();this.onDetach();}
             if(action==='window'){
-                const href='/client/console/'+encodeURIComponent(this.vm.id);
+                const href=(this.admin?'/admin/console/':'/client/console/')+encodeURIComponent(this.vm.id);
                 window.open(href,'_blank','noopener,noreferrer,popup=yes,width=1280,height=900');
                 this.releaseModifiers();this.disconnect();this.setStatus('Console ouverte dans une autre fenêtre. Si elle est bloquée, utilisez « Nouvel onglet ».');
             }
@@ -68,7 +68,7 @@ export class ConsoleView{
             const data=await this.api('portal/vps/'+this.vm.id+'/console','POST',{});
             if(this.disposed)return;
             if(data.simulated){this.screen.innerHTML='<div class="console-demo">Console de démonstration<br><small>Les commandes clavier seront disponibles sur votre VPS réel.</small></div>';this.setStatus('Démonstration — aucun serveur réel connecté');return;}
-            const socket=this.createSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/console');this.socket=socket;
+            const socket=this.createSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+(this.admin?'/ws/admin-console':'/ws/console'));this.socket=socket;
             socket.addEventListener('open',()=>{
                 if(this.disposed){socket.close();return;}
                 socket.send(JSON.stringify({ticket:data.ticket}));

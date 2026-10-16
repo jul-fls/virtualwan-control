@@ -410,7 +410,7 @@ def main():
         resources = json.loads(run('pvesh', 'get', '/cluster/resources', '--type', 'vm', '--output-format', 'json'))
         if any(v['vmid'] == p['vmid'] for v in resources):
             cfg = api(p, f'qemu/{vmid}/config')
-            if cfg.get('description') != marker:
+            if cfg.get('description','').split('\n',1)[0] != marker:
                 raise ValueError('Existing VM ID is not owned by this provisioning target')
             mac = re.search(r'virtio=([0-9A-Fa-f:]{17})', cfg['net0']).group(1)
             expected_refs = ','.join(f'{s}={p["snippet_storage"]}:snippets/virtualwan-{vmid}-{s}.yaml' for s in ('network', 'user'))

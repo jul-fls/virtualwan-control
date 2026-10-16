@@ -522,3 +522,13 @@ du statut CPU/RAM, de l’historique, du rescue sur ISO administrateur et de la
 sécurité du compte (mot de passe, MFA avec QR/codes de secours, passkeys, sessions).
 
 Voir [mise en place et migration](docs/PORTAIL-CLIENT.md) et [modèle de sécurité](SECURITY.md).
+
+### Gestion administrateur des VPS
+
+Depuis **Administrer** dans l’inventaire : commandes du portail client, console
+noVNC, rescue, reverse DNS, pare-feu, changement de gamme CPU/RAM/disque,
+verrouillage de la gestion cliente par VPS, suspension réseau et démarrage
+automatique. Le downgrade conserve les disques existants ; seule leur extension
+est automatisée. Les notes Proxmox reprennent le compte client et les informations
+techniques, sans effacer les notes personnelles. Voir
+[Administration des VPS](docs/PORTAIL-CLIENT.md#administration-des-vps).

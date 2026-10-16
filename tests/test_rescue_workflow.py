@@ -74,6 +74,8 @@ class RescueWorkflow(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):self.p.api('get','/config')
         with patch.object(self.p,'command',return_value='VM stopped after timeout\n"UPID:pve2:12345678:12345678:12345678:qmshutdown:120:root@pam:"\n'):
             self.assertTrue(self.p.api('create','/status/shutdown').startswith('UPID:'))
+        with patch.object(self.p,'command',return_value='update VM 120: -description marker\n\nClient: example\n'):
+            self.assertIsNone(self.p.api('set','/config',description='marker\n\nClient: example'))
         with patch.object(self.p,'command',return_value='unexpected garbage'):
             with self.assertRaises(json.JSONDecodeError):self.p.api('set','/config',boot='order=ide0;virtio0')
     def test_media_failure_logs_without_duplicate_action_argument(self):

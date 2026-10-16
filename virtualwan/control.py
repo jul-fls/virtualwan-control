@@ -195,7 +195,7 @@ class Control:
                 self.store.redactions.add(body['password'])
             db.execute("UPDATE ip_pool SET state='reserved',job_id=? WHERE ip=?",(job,ip))
             deployment=ident()
-            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(deployment,ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
+            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(deployment,ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'cores':model['cores'],'memory_mb':model['memory_mb'],'disk_gb':model['disk_gb'],'created_at':time.time(),'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
             if body.get('account_id'):
                 if not db.execute('SELECT 1 FROM accounts WHERE id=? AND enabled=1',(body['account_id'],)).fetchone():raise ValueError('Compte client introuvable ou suspendu.')
                 db.execute('INSERT INTO client_vms(deployment_id,account_id) VALUES(?,?)',(deployment,body['account_id']))
@@ -638,7 +638,11 @@ class Control:
             info.update(result,status='simulated' if self.demo else 'active')
             db.execute('UPDATE deployments SET data=? WHERE ip=?',(json.dumps(info),ip))
             db.execute("UPDATE ip_pool SET state='assigned' WHERE ip=? AND job_id=?",(ip,key))
-        self.store.event(key,'deployment.complete',public_ip=ip,**result);return result
+        self.store.event(key,'deployment.complete',public_ip=ip,**result)
+        if getattr(self,'notes_sync',None):
+            try:self.notes_sync(self.store.one('SELECT id FROM deployments WHERE ip=?',(ip,))['id'])
+            except Exception as error:self.store.event(key,'deployment.notes.pending',error_type=type(error).__name__)
+        return result
 
     def process_one(self):
         with self.store.tx() as db:

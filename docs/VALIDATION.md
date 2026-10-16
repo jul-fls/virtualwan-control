@@ -537,3 +537,34 @@ The v3 no-NoCloud boot also passed (generic hostname, networking unconfigured).
 The ISO was added to the existing shared PVE storage, its SHA-256 verified
 remotely and its volume ID confirmed visible on pve2 and pve3. No customer VM
 was rebooted or modified. The isolated validation container was removed.
+
+## Administrator VPS workspace — 2026-10-16
+
+- Shared VM routes require the admin cookie/CSRF on `/api/admin/*`, while
+  client routes retain ownership checks. Admin control works for unassigned
+  VPS. The management lock is enforced server-side, including rescue secrets
+  and ticket issuance, without disabling the whole account.
+- Real loopback WebSocket test: client console closes when its VPS is locked;
+  the admin console still transfers bytes on its separate route, cannot be
+  entered with a client cookie, and closes on admin session revocation.
+- A temporary PVE VM, never started, verified CPU/RAM upgrade, a 1→2 GiB disk
+  extension, downgrade retaining 2 GiB, network link flag restoration without
+  changing MAC/bridge, onboot changes and multiline notes. The test VM and
+  its disk were removed. No customer VM hardware, notes or network was changed.
+- Notes preserve their managed marker and manually written sections, escape
+  client-provided names, and update idempotently. The PVE CLI progress parser
+  supports a successful update notification containing a multiline description.
+- Hardware transition state precedes remote writes; verified resources/model
+  remain recorded if restart fails. Retry uses the saved target. An ancillary
+  notes failure does not force another hardware transition or erase its result.
+
+The application image must be rebuilt and redeployed by the operator. Existing
+VPS notes can then be synchronized from the admin inventory, or individually
+from the Administration tab. No additional environment variable is required.
+
+Final validation for the administrator workspace: **261 offline tests passed**.
+Chromium admin journey passed: model downgrade, lock/unlock, separate client
+refusal, network suspend/restore, notes sync, admin embedded/detached console
+while the client was locked, then restored client control; no JS errors. The
+existing full client journey also passed (power, reverse, firewall, rescue,
+console/fullscreen, passkeys, MFA, recovery and password change).

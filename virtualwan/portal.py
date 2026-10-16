@@ -38,17 +38,25 @@ def install_portal(app,store,control,origin):
             if len(times)>=8 or len(alltimes)>=50:abort(429)
             attempts[key]=times+[now];attempts[ipkey]=alltimes+[now]
     def body():return request.get_json()
+    def admin_actor():return request.path.startswith('/api/admin/')
+    def actor_id():return 'admin:'+g.session['user'] if admin_actor() else g.client['account_id']
+    def actor_session():return g.session['token'] if admin_actor() else g.client['token']
     def owner(key):
+        if admin_actor():
+            from .management import deployment
+            return deployment(store,key)
         rows=store.rows('SELECT d.*,v.display_name,v.description FROM deployments d JOIN client_vms v ON v.deployment_id=d.id WHERE d.id=? AND v.account_id=?',(key,g.client['account_id']))
         if not rows:abort(404)
-        row=rows[0];return {**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}}
+        row=rows[0];result={**json.loads(row['data']),**{k:v for k,v in row.items() if k!='data'}}
+        if result.get('management_locked'):raise domain.Conflict('La gestion de ce VPS est verrouillée par votre hébergeur. Contactez le support.')
+        return result
     def account_view():
         row=store.one('SELECT id,email,name,totp FROM accounts WHERE id=?',(g.client['account_id'],))
         row['mfa_enabled']=bool(row.pop('totp'));row['passkeys']=store.rows('SELECT id,name,created_at FROM passkeys WHERE account_id=?',(row['id'],))
         return row
     def public_vm(d):
         d={**d,'rescue_state':bool(d.get('rescue_state')),'rescue_transition':({'disable':bool(d['rescue_pending']['disable'])} if d.get('rescue_pending') else None)}
-        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb')}
+        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','management_locked','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb')}
     def login_response(result):
         if not result:abort(401)
         response=jsonify(csrf=result['csrf']);response.set_cookie('vwan_client',result['token'],max_age=28800,httponly=True,secure=origin.startswith('https://'),samesite='Strict',path='/');return response
@@ -59,7 +67,7 @@ def install_portal(app,store,control,origin):
         if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Ce VPS est actuellement indisponible pour cette opération.')
         with lock_guard:lock=locks.setdefault(key,threading.Lock())
         if not lock.acquire(blocking=False):raise domain.Conflict('Une autre opération est en cours sur ce VPS.')
-        run=ident();account=g.client['account_id']
+        run=ident();account=actor_id()
         try:
             d=owner(key)
             if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Une opération d’administration est en cours.')
@@ -93,6 +101,10 @@ def install_portal(app,store,control,origin):
             row=db.execute('SELECT data FROM deployments WHERE id=?',(key,)).fetchone()
             if not row:raise KeyError(key)
             data=json.loads(row['data']);data.update(values);db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(data),key))
+    @app.get('/admin/vps/<key>')
+    def admin_workspace(key):return render_template('client.html')
+    @app.get('/admin/console/<key>')
+    def admin_console_page(key):return render_template('console.html')
     @app.get('/client')
     @app.get('/client/')
     def client_index():return render_template('client.html')
@@ -163,18 +175,25 @@ def install_portal(app,store,control,origin):
         throttle('reauth:'+g.client['account_id']);accounts.reauth(g.client,body())
         with store.tx() as db:db.execute('DELETE FROM passkeys WHERE id=? AND account_id=?',(key,g.client['account_id']))
         store.event(ident(),'client.passkey.removed',account_id=g.client['account_id']);return jsonify(ok=True)
+    @app.put('/api/admin/vps/<key>')
     @app.put('/api/portal/vps/<key>')
     def client_metadata(key):
         owner(key);b=body();name=domain.label(b.get('display_name') or 'Mon VPS');description=str(b.get('description','')).strip()
         if len(description)>2000:raise ValueError('Description : 2000 caractères maximum.')
-        with store.tx() as db:db.execute('UPDATE client_vms SET display_name=?,description=? WHERE deployment_id=? AND account_id=?',(name,description,key,g.client['account_id']))
-        store.event(ident(),'client.vps.metadata.updated',account_id=g.client['account_id'],deployment_id=key,display_name=name,description=description)
+        with store.tx() as db:
+            if admin_actor():
+                db.execute('UPDATE client_vms SET display_name=?,description=? WHERE deployment_id=?',(name,description,key))
+                update_vm(key,display_name=name,description=description)
+            else:db.execute('UPDATE client_vms SET display_name=?,description=? WHERE deployment_id=? AND account_id=?',(name,description,key,g.client['account_id']))
+        store.event(ident(),'client.vps.metadata.updated',account_id=actor_id(),deployment_id=key,display_name=name,description=description)
         return jsonify(ok=True)
+    @app.get('/api/admin/vps/<key>/status')
     @app.get('/api/portal/vps/<key>/status')
     def client_status(key):
         d=owner(key)
         if control.demo:return jsonify(status='running' if d.get('power_state','running')=='running' else 'stopped',uptime=68400,cpu=.04,mem=512*1024**2,maxmem=2048*1024**2,cpus=2,netin=4211264,netout=2123456)
         with backend(d) as pve:return jsonify(pve.status())
+    @app.post('/api/admin/vps/<key>/power')
     @app.post('/api/portal/vps/<key>/power')
     def client_power(key):
         b=body();action=b.get('action')
@@ -186,9 +205,10 @@ def install_portal(app,store,control,origin):
                 with backend(d) as pve:result=pve.task(action)
             with store.tx() as db:db.execute('UPDATE client_operations SET result=? WHERE id=?',(json.dumps(result),run))
         return jsonify(operation_id=run,task=bool(result.get('task')),simulated=bool(result.get('simulated')))
+    @app.get('/api/admin/operations/<run>')
     @app.get('/api/portal/operations/<run>')
     def operation_status(run):
-        r=store.one('SELECT * FROM client_operations WHERE id=? AND account_id=?',(run,g.client['account_id']));result=json.loads(r['result'])
+        r=store.one('SELECT * FROM client_operations WHERE id=?'+('' if admin_actor() else ' AND account_id=?'),(run,) if admin_actor() else (run,g.client['account_id']));result=json.loads(r['result'])
         if result.get('task'):
             d=owner(r['deployment_id'])
             with backend(d) as pve:result.update(pve.task_status(result['task']))
@@ -197,12 +217,14 @@ def install_portal(app,store,control,origin):
             state='succeeded' if result.get('exitstatus')=='OK' else 'failed'
             with store.tx() as db:db.execute('UPDATE client_operations SET state=?,result=? WHERE id=?',(state,json.dumps(result),run))
             if r['state']!=state:store.event(run,'client.task.finished',state=state,exitstatus=result.get('exitstatus'))
-        return jsonify(state=state,result={k:result[k] for k in ('status','exitstatus','simulated','phase','message','error','reference','configured','restarted') if k in result})
+        return jsonify(state=state,result={k:result[k] for k in ('status','exitstatus','simulated','phase','message','error','reference','configured','restarted','disable','notes_pending') if k in result})
+    @app.get('/api/admin/vps/<key>/firewall')
     @app.get('/api/portal/vps/<key>/firewall')
     def get_firewall(key):
         d=owner(key)
         if control.demo:return jsonify(d.get('client_firewall',{'enabled':False,'cluster_enabled':True,'nic_enabled':False,'policy_in':'ACCEPT','rules':[],'other_rules':0}))
         with backend(d) as pve:return jsonify(pve.firewall())
+    @app.put('/api/admin/vps/<key>/firewall')
     @app.put('/api/portal/vps/<key>/firewall')
     def put_firewall(key):
         b=body();rules=validate_rules(b.get('rules',[]))
@@ -213,6 +235,7 @@ def install_portal(app,store,control,origin):
             else:
                 with backend(d) as pve:result=pve.set_firewall(b)
         return jsonify(result)
+    @app.put('/api/admin/vps/<key>/reverse')
     @app.put('/api/portal/vps/<key>/reverse')
     def client_reverse(key):
         b=body();name=str(b.get('hostname','')).lower().rstrip('.')
@@ -247,9 +270,10 @@ def install_portal(app,store,control,origin):
                 if ovh.call('GET',ptr).get('reverse','').rstrip('.')!=name:raise domain.Conflict('OVH n’a pas confirmé le nouveau reverse.')
             update_vm(key,reverse_dns=name);store.event(run,'client.reverse.updated',hostname=name,ip=d['ip'])
         return jsonify(ok=True)
+    @app.post('/api/admin/vps/<key>/graphical')
     @app.post('/api/portal/vps/<key>/graphical')
     def graphical(key):
-        d=owner(key);account=g.client['account_id']
+        d=owner(key);account=actor_id()
         if not control.demo and not control.allow_provision:raise domain.Conflict('Les opérations sur les VM sont désactivées par l’administrateur.')
         if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Ce VPS est actuellement indisponible pour cette opération.')
         with lock_guard:lock=locks.setdefault(key,threading.Lock())
@@ -298,6 +322,7 @@ def install_portal(app,store,control,origin):
             with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps({'error':'La préparation n’a pas pu démarrer. Réessayez.','phase':'checking'}),run))
             raise
         return jsonify(operation_id=run),202
+    @app.get('/api/admin/vps/<key>/rescue/credentials')
     @app.get('/api/portal/vps/<key>/rescue/credentials')
     def rescue_credentials(key):
         d=owner(key)
@@ -307,11 +332,12 @@ def install_portal(app,store,control,origin):
         if password:store.redactions.add(password)
         response=jsonify(username='rescue',password=password);response.headers['Cache-Control']='no-store'
         return response
+    @app.post('/api/admin/vps/<key>/rescue')
     @app.post('/api/portal/vps/<key>/rescue')
     def rescue(key):
         b=body()
         if b.get('confirmation')!='CONFIRMER':raise ValueError('Confirmer le redémarrage du VPS.')
-        d=owner(key);account=g.client['account_id'];disable=b.get('disable') is True
+        d=owner(key);account=actor_id();disable=b.get('disable') is True
         if not control.demo and not control.allow_provision:raise domain.Conflict('Les opérations sur les VM sont désactivées par l’administrateur.')
         with lock_guard:lock=locks.setdefault(key,threading.Lock())
         with store.tx() as db:
@@ -375,11 +401,12 @@ def install_portal(app,store,control,origin):
             with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps({'error':'Le basculement n’a pas pu démarrer. Réessayez.','phase':'checking'}),run))
             raise
         return jsonify(operation_id=run),202
+    @app.post('/api/admin/vps/<key>/console')
     @app.post('/api/portal/vps/<key>/console')
     def console_ticket(key):
         d=owner(key)
         if not control.demo and not control.allow_provision:raise domain.Conflict('Console désactivée par l’administrateur.')
-        ticket=accounts.challenge(g.client['account_id'],'console',{'deployment_id':key,'session':g.client['token'],'password':secrets.token_urlsafe(24)},60)
+        ticket=accounts.challenge(actor_id(),'console',{'deployment_id':key,'session':actor_session(),'admin':admin_actor(),'password':secrets.token_urlsafe(24)},60)
         data=json.loads(store.one('SELECT data FROM client_challenges WHERE id=?',(ticket,))['data'])
         return jsonify(ticket=ticket,password=data['password'],simulated=control.demo)
     @app.get('/api/accounts')
@@ -387,7 +414,10 @@ def install_portal(app,store,control,origin):
     @app.post('/api/accounts')
     def account_create():return jsonify(id=accounts.save(body())),201
     @app.put('/api/accounts/<key>')
-    def account_update(key):store.one('SELECT id FROM accounts WHERE id=?',(key,));return jsonify(id=accounts.save(body(),key))
+    def account_update(key):
+        store.one('SELECT id FROM accounts WHERE id=?',(key,));saved=accounts.save(body(),key)
+        for row in store.rows('SELECT deployment_id FROM client_vms WHERE account_id=?',(key,)):app.extensions['sync_vm_notes'](row['deployment_id'])
+        return jsonify(id=saved)
     @app.post('/api/accounts/<key>/reset-auth')
     def reset_auth(key):
         if body().get('confirmation')!='REINITIALISER':raise ValueError('Saisir REINITIALISER pour confirmer.')
@@ -402,4 +432,9 @@ def install_portal(app,store,control,origin):
             db.execute('DELETE FROM client_vms WHERE deployment_id=?',(key,))
             if account:db.execute('INSERT INTO client_vms(deployment_id,account_id) VALUES(?,?)',(key,account))
             db.execute("DELETE FROM client_challenges WHERE purpose='console'")
-        store.event(ident(),'deployment.account.assigned',deployment_id=key,account_id=account);return jsonify(ok=True)
+        store.event(ident(),'deployment.account.assigned',deployment_id=key,account_id=account)
+        app.extensions['sync_vm_notes'](key)
+        return jsonify(ok=True)
+
+    from .management import install_management
+    install_management(app,store,control,locks,lock_guard,public_vm,update_vm)

@@ -188,3 +188,47 @@ dans [rescue/README.md](../rescue/README.md). Il reprend le média NoCloud de
 chaque VM ; le compte `rescue` accepte sa clé SSH habituelle et un mot de passe propre à chaque activation. Ce mot de passe comporte 12 caractères alphanumériques sans caractères ambigus. Il reste consultable via « Voir les identifiants rescue » tant que ce mode est actif, est chiffré dans la base et supprimé au retour au disque système. Un badge jaune Rescue identifie ce mode dans la liste et la fiche VPS.
 
 Le live rescue reprend le FQDN technique avec `-rescue` ajouté au premier label : `vps-141951093-rescue.hosting.flusin.fr`. Ce nom est local au live ; le hostname du disque système, le DNS et le reverse ne changent pas. Cette fonction utilise l’ISO commune v3.
+
+## Administration des VPS
+
+Dans l’inventaire administrateur, **Administrer** ouvre `/admin/vps/<id>`.
+Cet espace utilise la session admin et propose les mêmes commandes que le
+client : alimentation, état, personnalisation, noVNC intégré/détaché, clavier,
+préparation VGA, rescue et ses identifiants, reverse DNS et pare-feu. Il fonctionne
+aussi sans compte client affecté. L’onglet **Administration** ajoute :
+
+- Changement de gamme : choisir un modèle CPU/RAM/disque, confirmer l’arrêt
+  automatique, suivre l’opération et sa reprise après interruption. Le système
+  et ses données ne sont pas réinstallés depuis le template du modèle. Un VPS
+  initialement arrêté reste arrêté ; un VPS allumé est redémarré.
+- Downgrade : CPU et RAM diminuent ; un disque déjà plus grand est conservé.
+  Aucun rétrécissement destructeur n’est tenté. Une extension agrandit le disque
+  virtuel ; la partition et le système de fichiers invités peuvent encore
+  nécessiter une extension dans l’OS. L’espace disponible est vérifié avant
+  une extension. Le plan et le modèle sont conservés pour permettre une reprise.
+- Verrouillage client par VPS, avec motif interne : bloque les API de gestion,
+  noVNC et les identifiants rescue du client. Le compte et ses autres VPS restent
+  utilisables. Les consoles clientes déjà ouvertes sont révoquées sous 10 s.
+  Les tâches déjà soumises terminent leur opération ; le verrou n’est pas une
+  annulation d’une commande déjà acceptée par Proxmox. L’admin garde son accès.
+- Suspension réseau indépendante : active `link_down` sur la carte virtuelle
+  sans changer sa MAC, son bridge, son VLAN ou son isolation. Elle coupe aussi
+  les connexions Internet et SSH, contrairement au seul verrou du portail. La
+  console admin reste utilisable. Pour retirer tous ces accès au client,
+  verrouiller la gestion ET suspendre le réseau, ou arrêter le VPS.
+- Démarrage automatique avec le nœud Proxmox.
+- Synchronisation des notes Proxmox : nom/e-mail du compte affecté, référence
+  client, VMID, gamme, ressources réelles, IPv4/IPv6, MAC, next-hop et état de
+  suspension. Le bloc Virtualwan est remplacé sans effacer les notes personnelles
+  ni le marqueur d’appartenance. Aucune clé, mot de passe ou jeton n’est ajouté.
+
+Les notes sont synchronisées après provisionnement, affectation ou modification
+du compte client, changement de gamme et d’état administratif. Si une opération
+est déjà en cours ou si la synchronisation échoue, **Synchroniser les notes**
+permet de reprendre. Dans Détails de l’inventaire, **Synchroniser les notes des
+VPS** traite aussi les VPS existants ; les VM occupées restent en attente et
+peuvent être relancées après la fin de leur opération. Les accès admin et client
+ne sont jamais interchangeables, même si le navigateur possède les deux cookies.
+Les consoles admin ont un canal et un ticket liés à la session administrateur.
+
+Les verrouillages et déverrouillages sont historisés avec l’acteur et le motif interne. Dans Activité de l’espace administrateur, le bouton Journal ouvre les étapes détaillées de chaque opération.
