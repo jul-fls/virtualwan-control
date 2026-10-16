@@ -568,3 +568,25 @@ refusal, network suspend/restore, notes sync, admin embedded/detached console
 while the client was locked, then restored client control; no JS errors. The
 existing full client journey also passed (power, reverse, firewall, rescue,
 console/fullscreen, passkeys, MFA, recovery and password change).
+
+
+## Réinstallation complète — 16 octobre 2026
+
+- Tests dédiés : séparation des sessions admin/client, propriété du VPS, CSRF,
+  confirmations, choix des accès, chiffrement et suppression du secret de reprise,
+  blocage rescue/changement de gamme et mutations concurrentes.
+- Interruptions simulées après import du disque, détachement de l’ancien,
+  détachement du disque préparé, attachement du disque neuf et suppression de
+  l’ancien. Chaque reprise conserve un seul import et n’efface que l’ancien volume.
+  Échec du démarrage : aucun nouvel import ni réécriture des accès à la reprise.
+- Chrome en démonstration : formulaire admin et client, refus d’une confirmation
+  incorrecte, réussite, progression et conservation des IP/FQDN, sans erreur JS.
+- Test sur le PVE réel avec la seule VM jetable 990095, carte déconnectée : copie
+  du template Debian, démarrage initial avec fichier témoin, remplacement du disque,
+  redémarrage de Debian, absence du fichier témoin via QEMU Guest Agent, IPv4
+  publique seule dans l’invité et reprise sans changement du nouveau disque.
+  La VM, ses volumes et ses snippets ont été supprimés après le test.
+- Aucun VPS client existant réinstallé. IPv6 et mot de passe sont vérifiés par les
+  tests locaux du backend ; le test Proxmox jetable utilise IPv4 et une clé SSH.
+  Le réseau Internet du VPS jetable reste déconnecté : aucune validation de service
+  SSH extérieur ou d’accès Internet de ce nouvel invité n’est revendiquée.

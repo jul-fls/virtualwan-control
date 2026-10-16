@@ -55,8 +55,8 @@ def install_portal(app,store,control,origin):
         row['mfa_enabled']=bool(row.pop('totp'));row['passkeys']=store.rows('SELECT id,name,created_at FROM passkeys WHERE account_id=?',(row['id'],))
         return row
     def public_vm(d):
-        d={**d,'rescue_state':bool(d.get('rescue_state')),'rescue_transition':({'disable':bool(d['rescue_pending']['disable'])} if d.get('rescue_pending') else None)}
-        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','management_locked','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb')}
+        d={**d,'reinstall_pending':bool(d.get('reinstall_pending')),'rescue_state':bool(d.get('rescue_state')),'rescue_transition':({'disable':bool(d['rescue_pending']['disable'])} if d.get('rescue_pending') else None)}
+        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','management_locked','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb','reinstall_pending')}
     def login_response(result):
         if not result:abort(401)
         response=jsonify(csrf=result['csrf']);response.set_cookie('vwan_client',result['token'],max_age=28800,httponly=True,secure=origin.startswith('https://'),samesite='Strict',path='/');return response
@@ -133,6 +133,9 @@ def install_portal(app,store,control,origin):
             if pending:vm['graphical_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
             pending=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND account_id=? AND action='rescue' AND state='running'",(vm['id'],g.client['account_id']))
             if pending:vm['rescue_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
+        for vm in clients:
+            pending=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND action='reinstall' AND state='running'",(vm['id'],))
+            if pending:vm['reinstall_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
         return jsonify(account=account_view(),csrf=g.client['csrf'],vps=clients,demo=control.demo,rescue_available=bool(os.environ.get('VWAN_RESCUE_ISO')),operations=store.rows('SELECT id,deployment_id,action,state,created_at FROM client_operations WHERE account_id=? ORDER BY created_at DESC LIMIT 50',(g.client['account_id'],)))
     @app.post('/api/portal/logout')
     def client_logout():
@@ -208,7 +211,11 @@ def install_portal(app,store,control,origin):
     @app.get('/api/admin/operations/<run>')
     @app.get('/api/portal/operations/<run>')
     def operation_status(run):
-        r=store.one('SELECT * FROM client_operations WHERE id=?'+('' if admin_actor() else ' AND account_id=?'),(run,) if admin_actor() else (run,g.client['account_id']));result=json.loads(r['result'])
+        r=store.one('SELECT * FROM client_operations WHERE id=?',(run,))
+        if not admin_actor() and r['account_id']!=g.client['account_id']:
+            if r['action']!='reinstall':abort(404)
+            owner(r['deployment_id'])
+        result=json.loads(r['result'])
         if result.get('task'):
             d=owner(r['deployment_id'])
             with backend(d) as pve:result.update(pve.task_status(result['task']))
@@ -426,7 +433,8 @@ def install_portal(app,store,control,origin):
     def assign(key):
         account=body().get('account_id')
         with store.tx() as db:
-            deployment=store.one('SELECT id FROM deployments WHERE id=?',(key,))
+            deployment=store.one('SELECT id,data FROM deployments WHERE id=?',(key,))
+            if json.loads(deployment['data']).get('reinstall_pending'):raise domain.Conflict('Terminer la réinstallation avant de changer le client affecté.')
             if db.execute("SELECT 1 FROM client_operations WHERE deployment_id=? AND state='running'",(key,)).fetchone():raise domain.Conflict('Une opération cliente est en cours.')
             if account:store.one('SELECT id FROM accounts WHERE id=?',(account,))
             db.execute('DELETE FROM client_vms WHERE deployment_id=?',(key,))
@@ -438,3 +446,6 @@ def install_portal(app,store,control,origin):
 
     from .management import install_management
     install_management(app,store,control,locks,lock_guard,public_vm,update_vm)
+
+    from .reinstall import install_reinstall
+    install_reinstall(app,store,control,locks,lock_guard,owner,actor_id,backend,update_vm)

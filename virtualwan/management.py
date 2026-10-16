@@ -38,6 +38,7 @@ def install_management(app,store,control,locks,lock_guard,public_vm,update_vm):
         try:
             with store.tx() as db:
                 d=deployment(store,key)
+                if d.get('reinstall_pending'):raise domain.Conflict('Terminer la réinstallation avant une autre modification.')
                 if db.execute("SELECT count(*) FROM client_operations WHERE state='running'").fetchone()[0]>=8:raise domain.Conflict('Plusieurs opérations sont en cours. Réessayez dans quelques instants.')
                 if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('VPS indisponible pour cette opération.')
                 db.execute('INSERT INTO client_operations VALUES(?,?,?,?,?,?,?)',(run,actor or 'admin:system',key,action,'running',json.dumps({'phase':'checking','message':'Préparation de l’opération…'}),time.time()))
@@ -90,7 +91,7 @@ def install_management(app,store,control,locks,lock_guard,public_vm,update_vm):
         for row in store.rows('SELECT id FROM deployments'):
             d=deployment(store,row['id']);v=public_vm(d)
             v.update({k:d.get(k) for k in ('account_id','account_name','account_email','customer','vmid','mac','next_hop','profile_id','model_id','management_lock_reason','network_suspended','notes_pending','resize_pending','onboot')})
-            for action,field in [('rescue','rescue_operation'),('graphical','graphical_operation')]:
+            for action,field in [('rescue','rescue_operation'),('graphical','graphical_operation'),('reinstall','reinstall_operation')]:
                 jobs=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND action=? AND state='running'",(d['id'],action))
                 if jobs:v[field]={'id':jobs[0]['id'],**json.loads(jobs[0]['result'])}
             jobs=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND action LIKE 'admin.%' AND state='running'",(d['id'],))

@@ -437,6 +437,7 @@ class Control:
             if not row:raise KeyError(key)
             if db.execute("SELECT 1 FROM client_operations WHERE deployment_id=? AND state='running'",(key,)).fetchone():raise domain.Conflict('Une opération cliente est en cours sur cette VM.')
             client={**json.loads(row['data']),**{k:row[k] for k in ('id','ip','profile_id','model_id')}}
+            if client.get('reinstall_pending'):raise domain.Conflict('Terminer la réinstallation avant de libérer ou supprimer le VPS.')
             if not client.get('vmid') or not client.get('mac') or not client.get('next_hop'):raise domain.Conflict('Identité VM incomplète : lire les VM avant suppression.')
             if client['status'] not in ('active','stopped','imported','simulated','detached'):raise domain.Conflict('VM en cours de modification ; vérifier le journal.')
             for active in db.execute("SELECT payload FROM jobs WHERE kind='retire' AND state IN ('queued','running','interrupted')"):

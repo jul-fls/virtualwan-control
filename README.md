@@ -532,3 +532,5 @@ automatique. Le downgrade conserve les disques existants ; seule leur extension
 est automatisée. Les notes Proxmox reprennent le compte client et les informations
 techniques, sans effacer les notes personnelles. Voir
 [Administration des VPS](docs/PORTAIL-CLIENT.md#administration-des-vps).
+
+La réinstallation complète est disponible dans les espaces client et admin : nouveaux accès SSH, remplacement du disque depuis le template, conservation des IP et reprise après interruption. Voir [le parcours et ses prérequis](docs/PORTAIL-CLIENT.md#réinstallation-complète-client-et-administrateur).

@@ -232,3 +232,56 @@ ne sont jamais interchangeables, même si le navigateur possède les deux cookie
 Les consoles admin ont un canal et un ticket liés à la session administrateur.
 
 Les verrouillages et déverrouillages sont historisés avec l’acteur et le motif interne. Dans Activité de l’espace administrateur, le bouton Journal ouvre les étapes détaillées de chaque opération.
+
+
+## Réinstallation complète (client et administrateur)
+
+Dans **Console & système → Réinstallation complète**, saisir les nouveaux accès
+SSH (clé, mot de passe de 12 caractères minimum, ou les deux), le FQDN exact,
+`REINSTALLER`, puis confirmer la suppression des données. L’administrateur dispose
+du même formulaire, même sans compte client affecté. Le verrou de gestion interdit
+cette action au client ; l’administrateur conserve son accès.
+
+L’opération arrête le VPS (arrêt forcé après 60 secondes si nécessaire), prépare
+une copie indépendante du disque du template du modèle actuel, remplace `scsi0`,
+supprime l’ancien volume Proxmox, régénère cloud-init et redémarre automatiquement.
+Elle conserve VMID, MAC, IPv4 /32, IPv6 /128 si affectée, routes, DNS/rDNS,
+ressources réelles (y compris un disque conservé après downgrade), compte client,
+notes, règles de pare-feu, isolation, suspension réseau et démarrage automatique.
+Le système et les comptes précédents sont remplacés. Le template doit être propre
+et préparé pour cloud-init, comme pour un nouveau VPS. La console reste en VGA,
+avec clavier français.
+
+Les nouvelles clés hôtes SSH sont générées au premier démarrage : vérifier leur
+nouvelle empreinte en console avant de remplacer l’ancienne entrée `known_hosts`.
+Le résultat « démarré » confirme le remplacement et l’état Proxmox ; cloud-init
+peut encore terminer l’installation des paquets et des accès dans le système.
+Conserver les nouveaux identifiants saisis : ils ne sont pas réaffichés après la
+réinstallation. Le mot de passe ne passe pas en argument de commande, est chiffré
+dans la base pendant une reprise, est haché dans le snippet cloud-init, puis le
+secret temporaire de l’application est supprimé après succès ou annulation.
+
+Le plan de remplacement est enregistré avant chaque étape irréversible. Après un
+redémarrage de l’application ou une erreur, **Reprendre la réinstallation** utilise
+le même disque neuf et les mêmes identifiants. Une erreur de démarrage ne provoque
+pas un nouvel effacement. Les autres modifications, l’affectation du compte et la
+libération/suppression du VPS sont bloquées jusqu’à la fin. Le client peut suivre
+la progression d’une réinstallation lancée par l’admin sur son VPS. Les événements
+détaillés restent dans le journal administrateur. L’annulation n’est possible
+qu’avant le début de préparation du nouveau disque ; ensuite, reprendre jusqu’à
+la fin. Le verrouillage client reste disponible à l’administrateur.
+
+Périmètre actuellement pris en charge : VM BIOS avec un unique disque système
+`scsi0`, média cloud-init `ide2` et snippets Virtualwan canoniques. Le template doit
+être sur le même nœud que la VM et son disque doit tenir dans la capacité allouée.
+Il faut assez d’espace pour préparer le nouveau disque avant de supprimer l’ancien.
+Une VM migrée doit disposer d’un template compatible sur son nœud : l’application
+refuse un import depuis un stockage local inaccessible. Les snapshots, disques
+supplémentaires/inutilisés non reconnus, EFI/TPM, passthrough et médias additionnels
+nécessitent une intervention admin préalable ; ils ne sont jamais effacés à
+l’aveugle. Sortir du rescue et terminer un changement de gamme avant de réinstaller.
+
+Il s’agit d’une réinitialisation logique du disque virtuel, sans garantie
+d’effacement physique des blocs SSD, ni suppression des sauvegardes externes.
+
+Référence : [options disque et suppression des volumes Proxmox](https://github.com/proxmox/pve-docs/blob/master/generated/qm.1-synopsis.adoc).
