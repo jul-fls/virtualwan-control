@@ -475,3 +475,41 @@ Application Compose redeployment is performed by the operator. Set
 the application image. Existing customer VMs have not been rebooted or switched
 to rescue by these validations. Old configured rescue sessions need a normal
 boot-mode return and new activation to gain per-session credentials.
+
+## Automatic rescue switching and partial-write recovery — 2026-10-15
+
+- Reproduced on an isolated PVE configuration: `pvesh set .../config` returns
+  plain `update VM ...` output after success, despite `--output-format json`.
+  Treating that as JSON caused an exception after the ISO attachment and left
+  application state/password uncommitted. The parser now accepts only this
+  known successful config notification; reads remain strict JSON.
+- Forked mutation tasks may precede their JSON UPID with progress. Their final
+  validated UPID is parsed separately and progress is journaled. SSH command
+  timeout allows the configured shutdown interval instead of expiring at 45 s.
+- Rescue is an owner-scoped asynchronous operation with per-VM exclusion,
+  progress polling and request deduplication. Power/VGA/retirement/reassignment
+  are excluded while it runs. Both activation and normal return automatically
+  shut down, wait, configure/verify and restart the VM. Shutdown has a 60 s
+  graceful window and authorizes Proxmox force-stop on timeout.
+- The encrypted password and durable resume plan precede remote config writes.
+  Media and boot order are written separately with fresh digests and read back.
+  Rescue state is committed before starting; a refused start retains the badge
+  and credentials. Retry reuses the plan/media/password.
+- Legacy orphan rescue CDs are replaced only after verifying the configured
+  shared image, session, VMID, MAC and IP; arbitrary devices are refused.
+- Offline Linux suite: **252 tests passed**. Regression coverage includes partial attachment/boot failures, failed
+  startup with credentials still available, retry, automatic power ordering,
+  unchanged cloud-init CD, foreign media, owner access and notification parsing.
+- Chromium client journey passed with the new asynchronous rescue API, password
+  reveal/reload/rotation and return-to-normal badge removal, without JS errors.
+
+The shared v2 ISO does not change; deploy the updated controller image. No new
+environment variable is required. Existing client VM power was not changed by
+code validation; the PVE integration probe is separate and has no network NIC.
+
+PVE integration result: an isolated VM with a temporary 1 GiB disk on raid1-ssd
+and no NIC completed both automatic cycles. The non-responsive boot exercised
+the configured graceful timeout/force-stop path. Rescue boot read back as
+`order=ide0;scsi0`; normal return read back as `order=scsi0`, with both rescue
+CDs absent and the credential ISO deleted. The VM, its temporary disk and its
+credential media were removed after the test. Customer VMs were not stopped.

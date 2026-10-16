@@ -47,8 +47,8 @@ def install_portal(app,store,control,origin):
         row['mfa_enabled']=bool(row.pop('totp'));row['passkeys']=store.rows('SELECT id,name,created_at FROM passkeys WHERE account_id=?',(row['id'],))
         return row
     def public_vm(d):
-        d={**d,'rescue_state':bool(d.get('rescue_state'))}
-        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','reverse_dns','rescue_state','memory_mb','cores','disk_gb')}
+        d={**d,'rescue_state':bool(d.get('rescue_state')),'rescue_transition':({'disable':bool(d['rescue_pending']['disable'])} if d.get('rescue_pending') else None)}
+        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb')}
     def login_response(result):
         if not result:abort(401)
         response=jsonify(csrf=result['csrf']);response.set_cookie('vwan_client',result['token'],max_age=28800,httponly=True,secure=origin.startswith('https://'),samesite='Strict',path='/');return response
@@ -119,6 +119,8 @@ def install_portal(app,store,control,origin):
         for vm in clients:
             pending=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND account_id=? AND action='graphical' AND state='running'",(vm['id'],g.client['account_id']))
             if pending:vm['graphical_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
+            pending=store.rows("SELECT id,result FROM client_operations WHERE deployment_id=? AND account_id=? AND action='rescue' AND state='running'",(vm['id'],g.client['account_id']))
+            if pending:vm['rescue_operation']={'id':pending[0]['id'],**json.loads(pending[0]['result'])}
         return jsonify(account=account_view(),csrf=g.client['csrf'],vps=clients,demo=control.demo,rescue_available=bool(os.environ.get('VWAN_RESCUE_ISO')),operations=store.rows('SELECT id,deployment_id,action,state,created_at FROM client_operations WHERE account_id=? ORDER BY created_at DESC LIMIT 50',(g.client['account_id'],)))
     @app.post('/api/portal/logout')
     def client_logout():
@@ -254,7 +256,7 @@ def install_portal(app,store,control,origin):
         with store.tx() as db:
             existing=db.execute("SELECT id FROM client_operations WHERE deployment_id=? AND account_id=? AND action='graphical' AND state='running'",(key,account)).fetchone()
             if existing:return jsonify(operation_id=existing['id']),202
-            if db.execute("SELECT count(*) FROM client_operations WHERE action='graphical' AND state='running'").fetchone()[0]>=4:raise domain.Conflict('Plusieurs préparations sont en cours. Réessayez dans quelques instants.')
+            if db.execute("SELECT count(*) FROM client_operations WHERE action IN ('rescue','graphical') AND state='running'").fetchone()[0]>=4:raise domain.Conflict('Plusieurs préparations sont en cours. Réessayez dans quelques instants.')
             if not lock.acquire(blocking=False):raise domain.Conflict('Une autre opération est en cours sur ce VPS.')
             run=ident()
             try:
@@ -308,22 +310,71 @@ def install_portal(app,store,control,origin):
     @app.post('/api/portal/vps/<key>/rescue')
     def rescue(key):
         b=body()
-        if b.get('confirmation')!='CONFIRMER':raise ValueError('Confirmer le changement de démarrage.')
-        with operation(key,'rescue') as (d,run):
-            disable=b.get('disable') is True;saved=d.get('rescue_state')
-            if disable and not saved:raise domain.Conflict('Mode rescue inactif.')
-            if not disable and saved:raise domain.Conflict('Mode rescue déjà actif.')
-            password=None if disable else rescue_password()
-            if password:store.redactions.add(password)
-            if control.demo:result=None if disable else {'boot':'order=scsi0','ide0':'demo:iso/rescue.iso,media=cdrom'}
-            else:
-                with backend(d) as pve:result=pve.rescue(os.environ.get('VWAN_RESCUE_ISO',''),disable,saved,password=password)
+        if b.get('confirmation')!='CONFIRMER':raise ValueError('Confirmer le redémarrage du VPS.')
+        d=owner(key);account=g.client['account_id'];disable=b.get('disable') is True
+        if not control.demo and not control.allow_provision:raise domain.Conflict('Les opérations sur les VM sont désactivées par l’administrateur.')
+        with lock_guard:lock=locks.setdefault(key,threading.Lock())
+        with store.tx() as db:
+            existing=db.execute("SELECT id FROM client_operations WHERE deployment_id=? AND account_id=? AND action='rescue' AND state='running'",(key,account)).fetchone()
+            if existing:return jsonify(operation_id=existing['id']),202
+            if db.execute("SELECT count(*) FROM client_operations WHERE action IN ('rescue','graphical') AND state='running'").fetchone()[0]>=4:raise domain.Conflict('Plusieurs préparations sont en cours. Réessayez dans quelques instants.')
+            if not lock.acquire(blocking=False):raise domain.Conflict('Une autre opération est en cours sur ce VPS.')
+            run=ident()
+            try:
+                d=owner(key)
+                if d.get('status') not in ('active','stopped','imported','simulated'):raise domain.Conflict('Ce VPS est actuellement indisponible pour cette opération.')
+                pending=d.get('rescue_pending')
+                if pending and pending['disable']!=disable:raise domain.Conflict('Reprendre d’abord le basculement interrompu.')
+                if not pending and bool(d.get('rescue_state'))==(not disable):raise domain.Conflict('Mode rescue déjà actif.' if not disable else 'Mode rescue inactif.')
+                saved=pending['saved'] if pending else d.get('rescue_state')
+                rows=db.execute('SELECT ciphertext FROM rescue_credentials WHERE deployment_id=?',(key,)).fetchall()
+                password=(store.cipher.decrypt(rows[0]['ciphertext']).decode() if rows and pending else rescue_password()) if not disable else None
+                if password:
+                    store.redactions.add(password)
+                    db.execute('INSERT OR REPLACE INTO rescue_credentials VALUES(?,?)',(key,store.cipher.encrypt(password.encode())))
+                db.execute('INSERT INTO client_operations VALUES(?,?,?,?,?,?,?)',(run,account,key,'rescue','running',json.dumps({'phase':'checking','message':'Basculement du VPS en cours…'}),time.time()))
+            except BaseException:lock.release();raise
+        d['_operation_run']=run
+        def progress(phase,message):
+            with store.tx() as db:db.execute('UPDATE client_operations SET result=? WHERE id=?',(json.dumps({'phase':phase,'message':message}),run))
+            store.event(run,'client.rescue.progress',phase=phase,message=message)
+        def checkpoint(plan,configured):
             with store.tx() as db:
-                update_vm(key,rescue_state=None if disable else result)
-                if disable:db.execute('DELETE FROM rescue_credentials WHERE deployment_id=?',(key,))
-                else:db.execute('INSERT OR REPLACE INTO rescue_credentials VALUES(?,?)',(key,store.cipher.encrypt(password.encode())))
-        response=jsonify(ok=True,**({'username':'rescue','password':password} if password else {}));response.headers['Cache-Control']='no-store'
-        return response
+                values={'rescue_pending':{'disable':disable,'saved':plan}}
+                if configured:values['rescue_state']=None if disable else plan
+                update_vm(key,**values)
+                if configured and disable:db.execute('DELETE FROM rescue_credentials WHERE deployment_id=?',(key,))
+        def prepare():
+            try:
+                store.event(run,'client.rescue.started',account_id=account,deployment_id=key,disable=disable)
+                if control.demo:
+                    progress('shutdown','Arrêt automatique du VPS…')
+                    plan=saved or {'boot':'order=scsi0','ide0':'demo:iso/rescue.iso,media=cdrom'}
+                    checkpoint(plan,False);progress('configuring','Configuration du démarrage…');checkpoint(plan,True)
+                    progress('starting','Redémarrage du VPS…')
+                else:
+                    factory=app.config.get('CLIENT_PVE_FACTORY',ClientPVE)
+                    with factory(store,store.document('profiles',d['profile_id']),d) as pve:pve.rescue(os.environ.get('VWAN_RESCUE_ISO',''),disable,saved,password=password,progress=progress,checkpoint=checkpoint)
+                update_vm(key,rescue_pending=None,power_state='running')
+                result={'phase':'ready','message':'VPS redémarré '+('sur son disque système.' if disable else 'en mode rescue.'),'disable':disable}
+                with store.tx() as db:db.execute("UPDATE client_operations SET state='succeeded',result=? WHERE id=?",(json.dumps(result),run))
+                store.event(run,'client.rescue.complete',disable=disable)
+            except Exception as error:
+                previous=json.loads(store.one('SELECT result FROM client_operations WHERE id=?',(run,))['result'])
+                message=str(error) if isinstance(error,domain.Conflict) else 'Le basculement a été interrompu à cette étape. Réessayez pour reprendre ; les médias et identifiants déjà préparés sont conservés.'
+                result={'phase':previous.get('phase','checking'),'message':message,'error':message,'reference':run,'disable':disable}
+                with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps(result),run))
+                store.event(run,'client.rescue.failed',phase=result['phase'],error_type=type(error).__name__,error=str(error))
+            finally:lock.release()
+        try:
+            runner=app.config.get('CLIENT_TASK_RUNNER')
+            if runner:runner(prepare)
+            else:threading.Thread(target=prepare,name='vwan-rescue-'+run[:8],daemon=True).start()
+        except Exception:
+            lock.release()
+            with store.tx() as db:db.execute("UPDATE client_operations SET state='failed',result=? WHERE id=?",(json.dumps({'error':'Le basculement n’a pas pu démarrer. Réessayez.','phase':'checking'}),run))
+            raise
+        return jsonify(operation_id=run),202
     @app.post('/api/portal/vps/<key>/console')
     def console_ticket(key):
         d=owner(key)

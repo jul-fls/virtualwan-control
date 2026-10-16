@@ -184,10 +184,10 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual(result['state'],'failed');self.assertIn('arrêté proprement',result['result']['error'])
         self.assertNotIn('infrastructure',result['result']['error'])
     def test_rescue_password_encrypted_available_only_to_owner_while_active(self):
-        self.login();path='/api/portal/vps/'+self.vm+'/rescue'
+        self.login();self.app.config['CLIENT_TASK_RUNNER']=lambda f:f();path='/api/portal/vps/'+self.vm+'/rescue'
         first=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
-        self.assertEqual(first.status_code,200);password=first.json['password'];self.assertEqual(len(password),12);self.assertRegex(password,r'^[A-Za-z0-9]{12}$');self.assertTrue(any(c.isupper() for c in password) and any(c.islower() for c in password) and any(c.isdigit() for c in password));self.assertFalse(set(password)&set('0O1Il'))
-        self.assertEqual(first.headers['Cache-Control'],'no-store');self.assertEqual(first.json['username'],'rescue')
+        self.assertEqual(first.status_code,202);credentials=self.client.get(path+'/credentials');password=credentials.json['password'];self.assertEqual(len(password),12);self.assertRegex(password,r'^[A-Za-z0-9]{12}$');self.assertTrue(any(c.isupper() for c in password) and any(c.islower() for c in password) and any(c.isdigit() for c in password));self.assertFalse(set(password)&set('0O1Il'))
+        self.assertEqual(credentials.headers['Cache-Control'],'no-store');self.assertEqual(credentials.json['username'],'rescue')
         self.assertEqual(self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers).status_code,409)
         self.assertNotIn(password,self.client.get('/api/portal/state').get_data(as_text=True))
         self.assertNotIn(password,json.dumps(self.store.rows('SELECT * FROM client_operations')))
@@ -210,38 +210,43 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual(self.store.rows('SELECT * FROM rescue_credentials'),[])
         self.assertNotIn('password',off.json)
         second=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
-        self.assertNotEqual(second.json['password'],password)
+        second_password=self.client.get(path+'/credentials').json['password'];self.assertNotEqual(second_password,password)
         # A failed return to disk must not lose the still-active credentials.
         from unittest.mock import MagicMock
         backend=MagicMock();backend.__enter__.return_value=backend;backend.rescue.side_effect=domain.Conflict('VM encore en marche.')
         self.app.config['CLIENT_PVE_FACTORY']=lambda *a:backend;self.control.demo=False;self.control.allow_provision=True
-        self.assertEqual(self.client.post(path,json={'confirmation':'CONFIRMER','disable':True},headers=self.headers).status_code,409)
-        self.assertEqual(self.client.get(path+'/credentials').json['password'],second.json['password'])
+        failed=self.client.post(path,json={'confirmation':'CONFIRMER','disable':True},headers=self.headers);self.assertEqual(failed.status_code,202);self.assertEqual(self.client.get('/api/portal/operations/'+failed.json['operation_id']).json['state'],'failed')
+        self.assertEqual(self.client.get(path+'/credentials').json['password'],second_password)
         with self.store.tx() as db:db.execute('DELETE FROM deployments WHERE id=?',(self.vm,))
         self.assertEqual(self.store.rows('SELECT * FROM rescue_credentials'),[])
-    def test_rescue_credential_cd_attached_and_removed_without_touching_cloudinit(self):
-        from unittest.mock import call
-        pve=ClientPVE(self.store,{}, {'id':self.vm,'vmid':120});pve.node='pve2';pve.config={'digest':'digest','boot':'order=scsi0;ide2'}
-        credential={'volid':'iso:iso/virtualwan-rescue-auth-120-'+('a'*32)+'.iso','session':'a'*32}
-        with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api',return_value=[{'volid':'iso:iso/rescue.iso'}]) as api,patch('virtualwan.adapters.rescue_media.media',return_value=credential) as media:
-            saved=pve.rescue('iso:iso/rescue.iso',password='SyntheticRescuePassword1234567890')
-            self.assertEqual(api.call_args.kwargs['ide1'],credential['volid']+',media=cdrom');self.assertNotIn('ide2',api.call_args.kwargs)
-            pve.config={'digest':'new','boot':'order=ide0;scsi0','ide0':saved['ide0'],'ide1':credential['volid']+',media=cdrom,size=1M'}
-            pve.rescue('',True,saved)
-            self.assertEqual(api.call_args.kwargs,{'delete':'ide0,ide1','digest':'new','boot':'order=scsi0;ide2'})
-            self.assertEqual(media.call_args.args,(pve,'delete'))
-            # Retry after detach but before credential ISO cleanup is idempotent.
-            pve.config={'digest':'last','boot':'order=scsi0;ide2'};api.reset_mock();pve.rescue('',True,saved);api.assert_not_called()
-    def test_rescue_never_overwrites_an_existing_credential_drive(self):
-        pve=ClientPVE(self.store,{},{});pve.config={'ide1':'customer-device'}
-        with patch.object(pve,'status',return_value={'status':'stopped'}),patch('virtualwan.adapters.rescue_media.media') as media:
-            with self.assertRaises(domain.Conflict):pve.rescue('iso:iso/rescue.iso',password='unused')
-            media.assert_not_called()
-    def test_rescue_restore_accepts_proxmox_size_annotation(self):
-        pve=ClientPVE(self.store,{},{});pve.config={'ide0':'iso:iso/rescue.iso,media=cdrom,size=1024K','digest':'digest'}
-        with patch.object(pve,'status',return_value={'status':'stopped'}),patch.object(pve,'api') as api:
-            pve.rescue('',True,{'ide0':'iso:iso/rescue.iso,media=cdrom','boot':'order=scsi0;ide2'})
-            api.assert_called_once_with('set','/config',delete='ide0',digest='digest',boot='order=scsi0;ide2')
+    def test_rescue_background_deduplicates_blocks_power_and_survives_start_failure(self):
+        from unittest.mock import MagicMock
+        self.login();pending=[];self.app.config['CLIENT_TASK_RUNNER']=pending.append
+        path='/api/portal/vps/'+self.vm+'/rescue'
+        first=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
+        again=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers)
+        self.assertEqual(first.status_code,202);self.assertEqual(first.json,again.json);self.assertEqual(len(pending),1)
+        self.assertEqual(self.client.post('/api/portal/vps/'+self.vm+'/power',json={'action':'start'},headers=self.headers).status_code,409)
+        self.assertEqual(self.client.get('/api/portal/state').json['vps'][0]['rescue_operation']['id'],first.json['operation_id'])
+        self.control.demo=False;self.control.allow_provision=True
+        backend=MagicMock();backend.__enter__.return_value=backend;self.app.config['CLIENT_PVE_FACTORY']=lambda *a:backend
+        plan={'boot':'order=scsi0','ide0':'iso:iso/rescue.iso,media=cdrom','credential_volid':'auth'}
+        def fail(*a,**kw):
+            kw['checkpoint'](plan,False);kw['checkpoint'](plan,True);kw['progress']('starting','Démarrage du VPS…')
+            raise domain.Conflict('Démarrage non confirmé, réessayez.')
+        backend.rescue.side_effect=fail;pending.pop()()
+        status=self.client.get('/api/portal/operations/'+first.json['operation_id']).json
+        self.assertEqual(status['state'],'failed');self.assertNotIn('infrastructure',status['result']['error'])
+        state=self.client.get('/api/portal/state').json['vps'][0];self.assertTrue(state['rescue_state']);self.assertEqual(state['rescue_transition'],{'disable':False})
+        password=self.client.get(path+'/credentials').json['password'];self.assertEqual(len(password),12)
+        def success(*a,**kw):
+            self.assertEqual(a[2],plan);self.assertEqual(kw['password'],password);kw['checkpoint'](plan,True);return plan
+        backend.rescue.side_effect=success
+        retry=self.client.post(path,json={'confirmation':'CONFIRMER'},headers=self.headers);pending.pop()()
+        self.assertEqual(self.client.get('/api/portal/operations/'+retry.json['operation_id']).json['state'],'succeeded')
+        state=self.client.get('/api/portal/state').json['vps'][0];self.assertIsNone(state['rescue_transition']);self.assertTrue(state['rescue_state'])
+        self.assertEqual(self.client.get(path+'/credentials').json['password'],password)
+
     def test_scalar_bootstrap_and_csv_without_json(self):
         os.environ.update(VWAN_ROUTER_BOOTSTRAP='true',VWAN_PROFILE_ID='scalar',VWAN_ROUTER_NAME='Scalar router',VWAN_ROUTER_PRIMARY_IP='8.8.8.8',VWAN_PFSENSE_NEXT_HOP_NETWORK='10.254.248.0/24',VWAN_GUEST_GATEWAY='10.254.248.1',VWAN_PFSENSE_PUBLIC_INTERFACE='opt_scalar',VWAN_GUEST_DNS='1.1.1.1,9.9.9.9',VWAN_MODEL_BOOTSTRAP='true')
         apply_environment(self.control);self.assertEqual(self.store.document('profiles','scalar')['config']['guest']['dns'],['1.1.1.1','9.9.9.9'])
@@ -291,7 +296,7 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual(items[0]['comment'],'ADMIN')
         self.assertTrue(items[1]['comment'].endswith(': SSH'));self.assertTrue(items[2]['comment'].endswith(': HTTP'))
         self.assertTrue(all(r.get('enable')==1 for r in items[1:]))
-    def test_rescue_requires_stopped_and_allowlisted_iso(self):
+    def test_rescue_requires_credentials_and_allowlisted_iso_before_stopping(self):
         pve=ClientPVE(self.store,{},{});pve.config={}
         with patch.object(pve,'status',return_value={'status':'running'}),patch.object(pve,'api') as api:
             with self.assertRaises(domain.Conflict):pve.rescue('iso:iso/rescue.iso')

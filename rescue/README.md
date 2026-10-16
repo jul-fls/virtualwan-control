@@ -65,9 +65,11 @@ VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v2.iso
 ```
 
 Recreate the management container after changing its environment. In the portal,
-stop the VM, enable rescue, start it, repair from console/SSH, stop it, return
-to the normal disk, then start it. The cloud-init CD must remain attached. The
-existing portal stores/restores boot order; the rescue image does not change
+enable rescue directly: the portal shuts down the VM, waits, attaches/verifies
+the CDs, sets/verifies boot order and starts it automatically. Shutdown allows
+60 seconds before Proxmox forces the stop. Return to the normal disk uses the
+same automatic stop/configure/start cycle. The cloud-init CD remains attached.
+The portal stores/restores boot order; the rescue image does not change
 normal guest networking, its SSH keys or disk contents automatically.
 
 Useful commands: `lsblk -f`, `ip -br addr`, `ip route`, `ip -6 route`,
@@ -99,3 +101,20 @@ The UI displays a yellow **Rescue** badge on the server card/detail and admin
 inventory while rescue boot is configured. This describes selected boot mode,
 not a guest-agent assertion that the live is currently running. Legacy active
 sessions without stored credentials must exit/re-enter rescue to generate them.
+
+## Interrupted switches
+
+Switches run in the background with owner-scoped progress. The plan and encrypted
+password are saved before attaching CDs; rescue state is confirmed and saved
+after reading back boot order, before starting the VM. A refused start therefore
+keeps the yellow badge and the password available. Use **Reprendre le basculement**
+to resume; the password and media are reused. Refreshing the page reconnects to
+the active operation. Power, VGA changes, reassignment and retirement are blocked
+while the operation runs. After an application restart, interrupted plans remain
+retryable. A retry completes cleanup even if the CDs are already detached.
+
+For the previous bug (CDs attached but no application state/password), activation
+may replace only media whose shared ISO, VMID, MAC, IP and session are verified.
+It creates a fresh password/media, preserves the normal disk boot order derived
+from the existing disks, verifies rescue boot, then removes the obsolete
+credential CD. Unknown or customer-owned devices are refused.

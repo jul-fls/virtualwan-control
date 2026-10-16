@@ -34,7 +34,8 @@ class ClientPVE:
     def __exit__(self,*args):
         if self.ssh:self.ssh.close()
     def command(self,args):
-        _,out,err=self.ssh.exec_command(shlex.join(self.prefix+args),timeout=45)
+        timeout=150 if len(args)>2 and args[0]=='pvesh' and args[1] in ('create','set','delete') else 45
+        _,out,err=self.ssh.exec_command(shlex.join(self.prefix+args),timeout=timeout)
         raw=out.read(2*1024*1024).decode();errors=err.read(65536).decode()
         code=out.channel.recv_exit_status()
         if code:
@@ -48,7 +49,20 @@ class ClientPVE:
         run=self.client.get('_operation_run',self.client.get('id') or ident())
         self.store.event(run,'client.pve.request',method=method,path=path,parameters=params)
         try:
-            raw=self.command(args);result=json.loads(raw) if raw.strip() else None
+            raw=self.command(args)
+            # pvesh config updates may print a progress line instead of JSON.
+            # Only accept the known notification on a successful config mutation.
+            if method=='set' and suffix=='/config':
+                raw=re.sub(r'^update VM '+str(int(self.client['vmid']))+r':[^\n]*(?:\n|$)','',raw)
+            try:result=json.loads(raw) if raw.strip() else None
+            except json.JSONDecodeError:
+                # Forked PVE workers can inherit stdout and precede their JSON
+                # task ID with progress output. Reads remain strict JSON.
+                if method not in ('create','delete'):raise
+                lines=raw.strip().splitlines()
+                result=json.loads(lines[-1])
+                if not isinstance(result,str) or not re.fullmatch(r'UPID:[A-Za-z0-9_.:@!+-]{10,250}',result):raise
+                self.store.event(run,'client.pve.task.output',message='\n'.join(lines[:-1]))
         except Exception as error:
             self.store.event(run,'client.pve.failed',method=method,path=path,error_type=type(error).__name__);raise
         self.store.event(run,'client.pve.complete',method=method,path=path)
@@ -183,37 +197,95 @@ class ClientPVE:
             if isinstance(error,GraphicalPreparationError):raise
             if configured:raise GraphicalPreparationError('L’affichage VGA est configuré, mais le démarrage n’a pas été confirmé. Vérifiez l’état du VPS et utilisez « Démarrer » si nécessaire.') from error
             raise GraphicalPreparationError('La préparation VGA a été interrompue avant confirmation de la modification. Les détails sont conservés dans le journal de cette opération.') from error
-    def rescue(self,iso,disable=False,saved=None,password=None):
+    @staticmethod
+    def system_boot(config):
+        boot=config.get('boot','')
+        order=re.search(r'(?:^|,)order=([^,]+)',boot)
+        disks=[k for k,v in config.items() if re.fullmatch(r'(?:scsi|virtio|sata|ide)\d+',k) and 'media=cdrom' not in str(v) and str(v)!='none']
+        devices=[d for d in (order.group(1).split(';') if order else [config.get('bootdisk','')]) if d in disks]
+        return 'order='+';'.join(dict.fromkeys(devices+sorted(disks))) if disks else None
+    def rescue(self,iso,disable=False,saved=None,password=None,progress=lambda *a:None,checkpoint=lambda *a:None):
+        progress('checking','Vérification du démarrage et des médias du VPS…')
+        if not disable:
+            if not re.fullmatch(r'[A-Za-z0-9_-]+:iso/[A-Za-z0-9_.-]+\.iso',iso):raise domain.Conflict('ISO rescue non configurée par l’administrateur.')
+            if not password:raise domain.Conflict('Les identifiants rescue doivent être générés par le portail.')
+            volumes=self.api('get',f'/nodes/{self.node}/storage/{iso.split(":")[0]}/content',content='iso')
+            if not any(v.get('volid')==iso for v in volumes):raise domain.Conflict('ISO rescue absente de ce nœud.')
+        current=self.status()['status']
+        if current not in ('running','stopped'):raise domain.Conflict('Le VPS est suspendu ou occupé. Reprendre son fonctionnement avant le basculement rescue.')
+        if current=='running':
+            progress('shutdown','Arrêt automatique du VPS en cours…')
+            task=self.api('create','/status/shutdown',timeout=60,forceStop=1)
+            message='L’arrêt du VPS n’a pas été confirmé. Réessayez le basculement ; aucun média ne sera modifié tant que le VPS tourne.'
+            self.wait_task(task,80,message);self.wait_power('stopped',15,message)
+        self.check_identity()
+        if self.status()['status']!='stopped':raise domain.Conflict('Le VPS a été rallumé pendant le basculement. Réessayez sans autre action d’alimentation.')
+        progress('configuring','VPS arrêté. Configuration des médias et de l’ordre de démarrage…')
+        result=self.configure_rescue(iso,disable,saved,password,checkpoint)
+        progress('starting','Démarrage du VPS sur '+('son disque système…' if disable else 'le système rescue…'))
+        self.check_identity()
+        task=self.api('create','/status/start')
+        message='Le démarrage est configuré et enregistré, mais le VPS n’a pas confirmé son redémarrage. Réessayez ou utilisez Démarrer.'
+        self.wait_task(task,90,message);self.wait_power('running',30,message)
+        progress('ready','VPS redémarré '+('sur son disque système.' if disable else 'en mode rescue.'))
+        return result
+    def configure_rescue(self,iso,disable=False,saved=None,password=None,checkpoint=lambda *a:None):
         from .rescue_media import media
-        if self.status()['status']!='stopped':raise domain.Conflict('Arrêter la VM avant de changer son démarrage rescue.')
+        saved=dict(saved or {})
+        if self.status()['status']!='stopped':raise domain.Conflict('Le VPS doit être arrêté avant de modifier son démarrage.')
+        def refresh():
+            self.config=self.api('get','/config');return self.config
+        def cd_matches(key,value):
+            current=self.config.get(key,'')
+            return current.split(',')[0]==value.split(',')[0] and 'media=cdrom' in current.split(',')
         if disable:
-            current=self.config.get('ide0','');auth=saved.get('credential_volid')
-            detached=not current and (not auth or not self.config.get('ide1')) and self.config.get('boot')==saved.get('boot')
+            if not saved.get('ide0'):raise domain.Conflict('La configuration normale à restaurer est absente.')
+            auth=saved.get('credential_volid');detached=not self.config.get('ide0') and (not auth or not self.config.get('ide1'))
             if not detached:
-                if current.split(',')[0]!=saved['ide0'].split(',')[0] or 'media=cdrom' not in current.split(','):raise domain.Conflict('Le lecteur rescue a changé ; intervention administrateur requise.')
-                if auth and self.config.get('ide1','').split(',')[0]!=auth:raise domain.Conflict('Le média des identifiants a changé ; intervention administrateur requise.')
-                params={'delete':'ide0'+(',ide1' if auth else ''),'digest':self.config['digest']}
+                if not cd_matches('ide0',saved['ide0']) or (auth and not cd_matches('ide1',auth)):raise domain.Conflict('Les lecteurs rescue ont changé ; intervention administrateur requise.')
+                # Restore boot before detaching devices referenced by its old order.
+                params={'digest':self.config['digest']}
                 if saved.get('boot'):params['boot']=saved['boot']
-                else:params['delete']+=',boot'
-                self.api('set','/config',**params)
+                else:params['delete']='boot'
+                self.api('set','/config',**params);refresh()
+                self.api('set','/config',delete='ide0'+(',ide1' if auth else ''),digest=self.config['digest']);refresh()
+            if self.config.get('ide0') or (auth and self.config.get('ide1')) or self.config.get('boot')!=saved.get('boot'):raise domain.Conflict('Le retour au disque système n’a pas été confirmé. Réessayez.')
+            checkpoint(saved,True)
             if auth:media(self,'delete',saved=saved)
-            return {'ok':True}
+            return saved
         if not re.fullmatch(r'[A-Za-z0-9_-]+:iso/[A-Za-z0-9_.-]+\.iso',iso):raise domain.Conflict('ISO rescue non configurée par l’administrateur.')
-        if self.config.get('ide0') or self.config.get('ide1'):raise domain.Conflict('Les lecteurs ide0/ide1 sont occupés ; aucun périphérique existant ne sera remplacé.')
-        if not password:raise domain.Conflict('Les identifiants de cette activation doivent être générés par le portail.')
+        if not password:raise domain.Conflict('Les identifiants rescue doivent être générés par le portail.')
         volumes=self.api('get',f'/nodes/{self.node}/storage/{iso.split(":")[0]}/content',content='iso')
         if not any(v.get('volid')==iso for v in volumes):raise domain.Conflict('ISO rescue absente de ce nœud.')
-        credential=media(self,'create',iso=iso,password=password)
-        saved={'boot':self.config.get('boot'),'ide0':iso+',media=cdrom','credential_volid':credential['volid'],'credential_session':credential['session']}
-        self.store.event(self.client.get('_operation_run',self.client.get('id') or ident()),'client.rescue.before',saved=saved)
-        try:self.api('set','/config',ide0=saved['ide0'],ide1=credential['volid']+',media=cdrom',boot='order=ide0;scsi0',digest=self.config['digest'])
-        except Exception:
-            # A timed-out API write may have succeeded. Never delete attached media.
-            try:
-                current=self.api('get','/config')
-                if current.get('ide1','').split(',')[0]!=credential['volid']:media(self,'delete',saved=saved)
-            except Exception:pass
-            raise
+        old=None
+        if not saved:
+            if self.config.get('ide0') or self.config.get('ide1'):
+                # Recover the previous bug only when both CDs demonstrably belong
+                # to this VM and this configured shared image. Never adopt arbitrary CDs.
+                if not cd_matches('ide0',iso):raise domain.Conflict('Le lecteur ide0 est occupé par un autre périphérique.')
+                match=re.fullmatch(re.escape(iso.split(':')[0])+r':iso/virtualwan-rescue-auth-'+str(int(self.client['vmid']))+r'-([a-f0-9]{32})\.iso',self.config.get('ide1','').split(',')[0])
+                if not match:raise domain.Conflict('Le lecteur ide1 ne possède pas un média rescue vérifiable.')
+                old={'credential_volid':self.config['ide1'].split(',')[0],'credential_session':match.group(1)}
+                media(self,'inspect',saved=old)
+            boot=self.system_boot(self.config) if old else self.config.get('boot')
+            credential=media(self,'create',iso=iso,password=password)
+            saved={'boot':boot,'ide0':iso+',media=cdrom','credential_volid':credential['volid'],'credential_session':credential['session'],'rescue_boot':'order=ide0'+(';' + self.system_boot(self.config).removeprefix('order=') if self.system_boot(self.config) else '')}
+            if old:saved['replaced_credential']=old
+            checkpoint(saved,False)
+        else:
+            if saved.get('ide0','').split(',')[0]!=iso:raise domain.Conflict('L’ISO configurée a changé depuis le début du basculement.')
+            old=saved.get('replaced_credential')
+            if self.config.get('ide0') and not cd_matches('ide0',iso):raise domain.Conflict('Le lecteur ide0 a changé pendant le basculement.')
+            allowed=[saved['credential_volid']]+([old['credential_volid']] if old else [])
+            if self.config.get('ide1') and self.config['ide1'].split(',')[0] not in allowed:raise domain.Conflict('Le lecteur ide1 a changé pendant le basculement.')
+            media(self,'create',iso=iso,password=password,saved=saved)
+        self.store.event(self.client.get('_operation_run',self.client.get('id') or ident()),'client.rescue.plan',saved=saved)
+        self.api('set','/config',ide0=saved['ide0'],ide1=saved['credential_volid']+',media=cdrom',digest=self.config['digest']);refresh()
+        if not cd_matches('ide0',saved['ide0']) or not cd_matches('ide1',saved['credential_volid']):raise domain.Conflict('Les médias rescue n’ont pas été confirmés. Réessayez.')
+        self.api('set','/config',boot=saved['rescue_boot'],digest=self.config['digest']);refresh()
+        if self.config.get('boot')!=saved['rescue_boot']:raise domain.Conflict('L’ordre de démarrage rescue n’a pas été confirmé. Réessayez.')
+        checkpoint(saved,True)
+        if old:media(self,'delete',saved=old)
         return saved
     def console(self,password):
         if self.status()['status']!='running':raise domain.Conflict('La VM doit être allumée pour ouvrir la console.')

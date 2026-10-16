@@ -90,9 +90,8 @@ vrai. Les listes DNS/préfixes utilisent des virgules, les booléens true/false.
   IP/clé de management n’est fournie au client. Une session est limitée à une
   heure et vérifiée toutes les 10 s contre révocation/changement d’affectation.
 - **Rescue** : configurer `VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v2.iso` avec une ISO
-  existante disponible sur tous les nœuds concernés. VM arrêtée, activer le boot
-  rescue, la démarrer, réparer, l’arrêter, revenir au disque et la redémarrer.
-  Le lecteur `ide0` doit être libre ; le disque cloud-init existant reste intact.
+  existante disponible sur tous les nœuds concernés. Le basculement arrête automatiquement le VPS, vérifie les médias et l’ordre de démarrage, enregistre les identifiants puis le redémarre. Le retour au disque suit le même cycle.
+  Les lecteurs `ide0` et `ide1` doivent être libres ou contenir les seuls médias rescue vérifiés de cette VM ; le disque cloud-init existant reste intact.
 - **Personnalisation** : nom d’affichage/description propres au client ; le nom
   technique, les IP et l’identité d’isolation ne changent pas.
 
