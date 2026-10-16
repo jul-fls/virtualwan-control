@@ -20,7 +20,7 @@ def os_user_data(guest,fqdn,ipv4,mac,access,hashed_password='',config=None):
     family=guest.get('os_family','debian');bsd=family=='freebsd';rpm=family in ('fedora','almalinux','rocky')
     interface=guest['interface']
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,14}',interface):raise ValueError('Invalid guest interface')
-    user={'name':access['username'],'shell':'/bin/sh' if bsd else '/bin/bash','groups':['wheel' if bsd or rpm else 'sudo'],'sudo':['ALL=(ALL) NOPASSWD:ALL'],'lock_passwd':access['ssh_auth']=='key'}
+    user={'name':access['username'],'shell':'/bin/sh' if bsd else '/bin/bash','groups':['wheel' if bsd or rpm else 'sudo'],'sudo':['ALL=(ALL) NOPASSWD:ALL'],'lock_passwd':access['ssh_auth']=='key' and not bsd}
     if access.get('public_key'):user['ssh_authorized_keys']=[access['public_key']]
     if hashed_password:user['hashed_passwd']=hashed_password
     data={'users':[user],'disable_root':True,'ssh_pwauth':access['ssh_auth']!='key','chpasswd':{'expire':False},'ssh_deletekeys':True,'fqdn':fqdn,'hostname':fqdn,'prefer_fqdn_over_hostname':True}
@@ -33,7 +33,7 @@ def os_user_data(guest,fqdn,ipv4,mac,access,hashed_password='',config=None):
             addr=str(ipaddress.IPv6Address(config['address']));link=str(ipaddress.IPv6Address(config['gateway_link_local']))
             rc+=f'ifconfig_{interface}_ipv6="inet6 {addr} prefixlen 128 -accept_rtadv auto_linklocal"\nipv6_defaultrouter="{link}%{interface}"\n'
         rc+='keymap="fr"\n'
-        data.update(packages=['sudo','curl','python3','qemu-guest-agent'],write_files=[{'path':'/etc/rc.conf','append':True,'content':rc},{'path':'/boot/loader.conf','append':True,'content':'\nconsole="vidconsole"\n'},{'path':'/etc/resolv.conf','content':''.join('nameserver '+str(ipaddress.ip_address(n))+'\n' for n in guest['dns'])}],bootcmd=[['sh','-c',f'route add -host {gw} -iface {interface} 2>/dev/null || true; route change default {gw} 2>/dev/null || route add default {gw}']],runcmd=[['sysrc','qemu_guest_agent_enable=YES'],['service','qemu-guest-agent','start']])
+        data.update(packages=['sudo','curl','python3','qemu-guest-agent'],write_files=[{'path':'/etc/rc.conf','append':True,'content':rc},{'path':'/boot/loader.conf','append':True,'content':'\nconsole="vidconsole"\n'},{'path':'/etc/resolv.conf','content':''.join('nameserver '+str(ipaddress.ip_address(n))+'\n' for n in guest['dns'])}],bootcmd=[['install','-d','-m','0755','/home'],['sh','-c',f'route add -host {gw} -iface {interface} 2>/dev/null || true; route change default {gw} 2>/dev/null || route add default {gw}']],runcmd=[['sysrc','qemu_guest_agent_enable=YES'],['sh','-c','service qemu-guest-agent onestatus >/dev/null 2>&1 || service qemu-guest-agent start']])
         if config:data['bootcmd'].append(['sh','-c',f'ifconfig {interface} inet6 -accept_rtadv; ifconfig {interface} inet6 {addr} prefixlen 128 alias 2>/dev/null || true; route change -inet6 default {link}%{interface} 2>/dev/null || route add -inet6 default {link}%{interface}'])
     else:
         data['packages']=['qemu-guest-agent','curl','python3','sudo']+(['kbd'] if rpm else ['keyboard-configuration','console-setup'])
