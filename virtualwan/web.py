@@ -37,6 +37,8 @@ def create_app(test_config=None):
         db.execute("INSERT OR REPLACE INTO settings VALUES('mode',?)",(mode,))
     store.redactions.add(password)
     control=Control(store,demo,os.environ.get('VWAN_ENABLE_PURCHASES')=='true',os.environ.get('VWAN_ENABLE_PROVISIONING')=='true',app.config.get('PROVIDER_FACTORY'))
+    from .os_catalog import install_os_catalog,images as list_os_images,FAMILIES
+    install_os_catalog(app,store,control)
     from .environment import apply_environment
     apply_environment(control)
     app.extensions.update(store=store,control=control)
@@ -144,7 +146,7 @@ def create_app(test_config=None):
             jobs=store.rows('SELECT id,kind,state,result,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT 100')
             for job in jobs:job['result']=json.loads(job['result'])
             purchases=[store.document('purchases',r['id']) for r in store.rows('SELECT id FROM purchases ORDER BY created_at DESC LIMIT 100')]
-            return jsonify(version=__version__,demo=demo,features={'purchases':control.allow_purchase or demo,'provisioning':control.allow_provision or demo},profiles=profiles,models=models,
+            return jsonify(os_images=list_os_images(store),os_families=FAMILIES,version=__version__,demo=demo,features={'purchases':control.allow_purchase or demo,'provisioning':control.allow_provision or demo},profiles=profiles,models=models,
                            accounts=app.extensions['accounts'].list(),assignments=store.rows('SELECT * FROM client_vms'),ips=store.rows('SELECT * FROM ip_pool ORDER BY profile_id,ip'),deployments=control.deployments(),jobs=jobs,purchases=purchases,secret_names=[r['name'] for r in store.rows('SELECT name FROM secrets')])
     @app.post('/api/profiles')
     def profile_create():return jsonify(id=control.add_profile(request.get_json())),201

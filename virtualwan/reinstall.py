@@ -27,6 +27,19 @@ def install_reinstall(app,store,control,locks,lock_guard,owner,actor_id,backend,
             if rows and json.loads(rows[0]['data']).get('reinstall_pending'):
                 owner(match[1])
                 raise domain.Conflict('Terminer ou reprendre la réinstallation avant une autre modification du VPS.')
+    @app.get('/api/admin/vps/<key>/os-images')
+    @app.get('/api/portal/vps/<key>/os-images')
+    def vm_os_images(key):
+        from .os_catalog import available_images
+        d=owner(key);profile=store.document('profiles',d['profile_id']);node=profile['config']['pve']['node']
+        if not control.demo:
+            with backend(d) as pve:node=pve.node
+        rows=[{'id':'default','name':'Debian · template du modèle','family':'debian','available':True}]
+        rows += [{k:i[k] for k in ('id','name','family')}|{'available':node in i['templates']} for i in available_images(store,profile['id'])]
+        rows.append({'id':'custom','name':'ISO personnalisé · installation manuelle','family':'custom','available':True})
+        g=profile['config']['guest'];v6=profile['config'].get('ipv6') or {}
+        return jsonify(images=rows,current=d.get('os_id','default'),network={'ipv4':d.get('ip'),'ipv4_prefix':32,'gateway':g['gateway'],'ipv6':d.get('public_ipv6'),'ipv6_prefix':128,'gateway_ipv6':v6.get('gateway_link_local'),'dns':g['dns'],'mtu':g['mtu'],'hostname':d['fqdn']})
+
     @app.post('/api/admin/vps/<key>/reinstall/cancel')
     @app.post('/api/portal/vps/<key>/reinstall/cancel')
     def cancel_reinstall(key):
@@ -61,10 +74,20 @@ def install_reinstall(app,store,control,locks,lock_guard,owner,actor_id,backend,
                 pending=d.get('reinstall_pending')
                 if not pending:
                     profile=store.document('profiles',d['profile_id']);guest=profile['config']['guest']
-                    access=credentials(b,guest)
                     models=store.rows('SELECT data FROM models WHERE id=?',(d.get('model_id'),))
                     model=json.loads(models[0]['data']) if models else {}
-                    pending={'id':ident(),'template':domain.positive(model.get('template') or profile['config']['pve']['template'],999999999),'phase':'checking','username':access['username'],'ssh_auth':access['ssh_auth']}
+                    from .os_catalog import select_image
+                    node=profile['config']['pve']['node']
+                    if not control.demo:
+                        with backend(d) as pve:node=pve.node
+                    image=select_image(store,profile,model,b.get('os_image_id'),node)
+                    access=credentials(b,guest) if image['family']!='custom' else {'username':guest.get('username','debian'),'ssh_auth':'key','password':'','public_key':''}
+                    pending={'id':ident(),'template':domain.positive(image['template'],999999999),'phase':'checking','username':access['username'],'ssh_auth':access['ssh_auth'],'os_image':image}
+                    if image['family']=='custom':
+                        from .media import media_record
+                        media=media_record(store,key)
+                        if not media or media['state']!='ready':raise domain.Conflict('Importer un ISO privé avant de réinstaller en mode personnalisé.')
+                        pending['custom_iso']=media['volume']
                     name='REINSTALL_'+pending['id'].upper()
                     store.secret_set(name,json.dumps(access));pending['access_env']=name
                     update_vm(key,reinstall_pending=pending)
@@ -88,7 +111,12 @@ def install_reinstall(app,store,control,locks,lock_guard,owner,actor_id,backend,
                         from .adapters.reinstall import fresh_install
                         fresh_install(pve,pending,access,progress,checkpoint)
                 with store.tx() as db:
-                    update_vm(key,reinstall_pending=None,reinstalled_at=time.time(),power_state='running',notes_pending=True)
+                    image=pending.get('os_image',{'id':'default','name':'Debian','family':'debian'})
+                    update_vm(key,reinstall_pending=None,reinstalled_at=time.time(),power_state='running',notes_pending=True,os_id=image['id'],os_name=image['name'],os_family=image['family'])
+                    from .media import media_record,save_media
+                    media=media_record(store,key)
+                    if media:
+                        media.update(mounted=image['family']=='custom',next_boot=image['family']=='custom');save_media(store,key,media)
                     db.execute('DELETE FROM secrets WHERE name=?',(pending['access_env'],))
                     db.execute('DELETE FROM rescue_credentials WHERE deployment_id=?',(key,))
                     db.execute("UPDATE client_operations SET state='succeeded',result=? WHERE id=?",(json.dumps({'phase':'ready','message':'Système neuf installé. VPS démarré ; cloud-init initialise les nouveaux accès. Les clés hôtes SSH ont changé.'}),run))

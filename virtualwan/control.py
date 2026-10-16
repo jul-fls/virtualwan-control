@@ -166,16 +166,22 @@ class Control:
         profile=self.store.document('profiles',body['profile_id']);model=model_snapshot or self.store.document('models',body['model_id'])
         if not profile['ready']:raise domain.Conflict('Le profil doit être configuré et prêt avant un déploiement.')
         if not self.demo and not self.allow_provision:raise domain.Conflict('Déploiement réel désactivé par VWAN_ENABLE_PROVISIONING.')
-        auth=body.get('ssh_auth','key')
+        from .os_catalog import select_image
+        image=select_image(self.store,profile,model,body.get('os_image_id'))
+        custom=image['family']=='custom'
+        auth=body.get('ssh_auth','key') if not custom else 'key'
         if auth not in ('key','password','both'):raise ValueError('Méthode SSH invalide.')
-        if auth in ('key','both') and (not isinstance(body.get('public_key',''),str) or not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?',body.get('public_key','').strip())):raise ValueError('Clé SSH publique invalide.')
+        if not custom and auth in ('key','both') and (not isinstance(body.get('public_key',''),str) or not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?',body.get('public_key','').strip())):raise ValueError('Clé SSH publique invalide.')
         if auth in ('password','both') and (not isinstance(body.get('password'),str) or not 12<=len(body['password'])<=1024 or any(c in body['password'] for c in ('\n','\r','\x00'))):raise ValueError('Mot de passe invité de 12 à 1024 caractères, sur une seule ligne.')
         config=deepcopy(profile['config']);config['pve'].update({k:model[k] for k in ('cores','memory_mb','disk_gb','template')})
+        config['pve']['template']=image['template']
+        config['guest'].update(os_family=image['family'],os_name=image['name'],interface=image['interface'])
         config['pve']['vmid']=None;config['pfsense']['next_hop']=None
         config['guest']['ssh_auth']=auth
         config['guest']['username']=body.get('username',config['guest'].get('username','debian'))
         if not isinstance(config['guest']['username'],str) or config['guest']['username']=='root' or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}',config['guest']['username']):raise ValueError('Utilisateur Linux non-root valide requis.')
-        config['require_client_isolation']=True;config['start_vm']=True
+        config['require_client_isolation']=True;config['start_vm']=not custom
+        if custom:config['reboot_test']=False
         customer=str(body.get('customer','')).strip()[:150]
         with self.store.tx() as db:
             if body.get('ip'):
@@ -195,7 +201,7 @@ class Control:
                 self.store.redactions.add(body['password'])
             db.execute("UPDATE ip_pool SET state='reserved',job_id=? WHERE ip=?",(job,ip))
             deployment=ident()
-            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(deployment,ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'cores':model['cores'],'memory_mb':model['memory_mb'],'disk_gb':model['disk_gb'],'created_at':time.time(),'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
+            db.execute('INSERT INTO deployments VALUES(?,?,?,?,?)',(deployment,ip,profile['id'],model['id'],json.dumps({'fqdn':fqdn,'status':'queued','job_id':job,'customer':customer,'cores':model['cores'],'memory_mb':model['memory_mb'],'disk_gb':model['disk_gb'],'created_at':time.time(),'os_id':image['id'],'os_name':image['name'],'os_family':image['family'],'mac':None,'next_hop':None,'vmid':None,'simulated':self.demo})))
             if body.get('account_id'):
                 if not db.execute('SELECT 1 FROM accounts WHERE id=? AND enabled=1',(body['account_id'],)).fetchone():raise ValueError('Compte client introuvable ou suspendu.')
                 db.execute('INSERT INTO client_vms(deployment_id,account_id) VALUES(?,?)',(deployment,body['account_id']))
@@ -231,7 +237,7 @@ class Control:
             payload.update(draft_id=body['draft_id'],item_configurations=body.get('item_configurations',{}))
         followup=body.get('followup')
         if followup:
-            followup={k:v for k,v in followup.items() if k in ('model_id','customer','username','public_key','ssh_auth')}
+            followup={k:v for k,v in followup.items() if k in ('model_id','customer','username','public_key','ssh_auth','os_image_id')}
         payload.update(kind=kind,quantity=quantity,profile_id=p['id'],profile_revision=p['revision'],configurations=body.get('configurations',{}),purchase_id=purchase,followup=followup,simulated=self.demo)
         if payload['followup']:
             if kind!='additional_ip' or quantity!=1:raise ValueError('Achat + déploiement nécessite exactement une IP.')
@@ -443,6 +449,11 @@ class Control:
             for active in db.execute("SELECT payload FROM jobs WHERE kind='retire' AND state IN ('queued','running','interrupted')"):
                 if json.loads(active['payload'])['client']['id']==key:raise domain.Conflict('Suppression déjà en cours ou interrompue ; consulter son journal.')
             if not client['ip'] and mode!='delete':raise domain.Conflict('Cette VM n’a plus d’IP ; seule sa suppression est disponible.')
+            if getattr(self,'retirement_media',None):
+                media=self.retirement_media(key)
+                if media and media.get('volume'):
+                    client['private_iso']=media['volume']
+                    client['private_iso_storage']=media['volume'].split(':',1)[0]
             job=self.store.job('retire',{'profile_id':row['profile_id'],'client':client,'mode':mode,'simulated':self.demo},db)
             info=json.loads(row['data']);info.update(status='releasing' if mode=='release' else 'retiring',retirement_job=job)
             db.execute('UPDATE deployments SET data=? WHERE id=?',(json.dumps(info),key))
@@ -501,7 +512,16 @@ class Control:
                 info={k:v for k,v in client.items() if k not in ('id','ip','profile_id','model_id')}
                 info.update(status='detached',last_attachment={'ip':ip,'fqdn':client.get('fqdn'),'public_ipv6':result.get('released_ipv6') or client.get('public_ipv6'),'ipv6_config':client.get('ipv6_config')},network_detached=True,public_ipv6=None,link_local_ipv6=None,ipv6_config=None)
                 db.execute('UPDATE deployments SET ip=NULL,data=? WHERE id=?',(json.dumps(info),client['id']))
-            elif client:db.execute('DELETE FROM deployments WHERE id=?',(client['id'],))
+            elif client:
+                # The PVE destroy operation already removed the owned ISO. Drop
+                # any failed local staging file only after that succeeds.
+                rows=db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vm_media'").fetchall()
+                media=db.execute('SELECT data FROM vm_media WHERE deployment_id=?',(client['id'],)).fetchone() if rows else None
+                if media:
+                    value=json.loads(media['data'])
+                    if not re.fullmatch(r'[a-f0-9]{32}',client['id']) or not re.fullmatch(r'[a-f0-9]{32}',value['id']):raise domain.Conflict('Identité du média local invalide.')
+                    (self.store.root/'client-media'/(client['id']+'-'+value['id']+'.part')).unlink(missing_ok=True)
+                db.execute('DELETE FROM deployments WHERE id=?',(client['id'],))
             db.execute("UPDATE ip_pool SET state=?,job_id=NULL WHERE ip=? AND job_id=?",('available' if release else 'reserved',ip,key))
             # A purchased IP with a VM follow-up is reserved atomically before it
             # becomes visible as free stock to another administrator request.

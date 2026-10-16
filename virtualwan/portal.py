@@ -56,7 +56,7 @@ def install_portal(app,store,control,origin):
         return row
     def public_vm(d):
         d={**d,'reinstall_pending':bool(d.get('reinstall_pending')),'rescue_state':bool(d.get('rescue_state')),'rescue_transition':({'disable':bool(d['rescue_pending']['disable'])} if d.get('rescue_pending') else None)}
-        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','management_locked','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb','reinstall_pending')}
+        return {k:d.get(k) for k in ('id','fqdn','ip','public_ipv6','status','display_name','description','management_locked','reverse_dns','rescue_state','rescue_transition','memory_mb','cores','disk_gb','reinstall_pending','os_id','os_name','os_family')}
     def login_response(result):
         if not result:abort(401)
         response=jsonify(csrf=result['csrf']);response.set_cookie('vwan_client',result['token'],max_age=28800,httponly=True,secure=origin.startswith('https://'),samesite='Strict',path='/');return response
@@ -447,5 +447,7 @@ def install_portal(app,store,control,origin):
     from .management import install_management
     install_management(app,store,control,locks,lock_guard,public_vm,update_vm)
 
+    from .media import install_media
+    install_media(app,store,control,locks,lock_guard,owner,backend,actor_id)
     from .reinstall import install_reinstall
     install_reinstall(app,store,control,locks,lock_guard,owner,actor_id,backend,update_vm)

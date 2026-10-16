@@ -534,3 +534,8 @@ techniques, sans effacer les notes personnelles. Voir
 [Administration des VPS](docs/PORTAIL-CLIENT.md#administration-des-vps).
 
 La réinstallation complète est disponible dans les espaces client et admin : nouveaux accès SSH, remplacement du disque depuis le template, conservation des IP et reprise après interruption. Voir [le parcours et ses prérequis](docs/PORTAIL-CLIENT.md#réinstallation-complète-client-et-administrateur).
+
+
+## Systèmes et ISO privés
+
+Le catalogue **Systèmes & templates** permet de publier plusieurs versions de Debian, Ubuntu, Fedora, AlmaLinux, Rocky Linux et FreeBSD, indépendamment des gammes. Chaque VPS dispose aussi d’un lecteur ISO privé, un fichier de 10 Go maximum, avec insertion/éjection à chaud et boot ISO manuel. Voir [le guide des systèmes et ISO](docs/SYSTEMES-ET-ISO.md) pour préparer les templates, les prérequis FreeBSD et la configuration du stockage.

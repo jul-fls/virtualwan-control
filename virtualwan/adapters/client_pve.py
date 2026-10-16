@@ -36,8 +36,8 @@ class ClientPVE:
             self.ssh.close();raise
     def __exit__(self,*args):
         if self.ssh:self.ssh.close()
-    def command(self,args):
-        timeout=150 if len(args)>2 and args[0]=='pvesh' and args[1] in ('create','set','delete') else 45
+    def command(self,args,timeout=None):
+        timeout=timeout or (150 if len(args)>2 and args[0]=='pvesh' and args[1] in ('create','set','delete') else 45)
         _,out,err=self.ssh.exec_command(shlex.join(self.prefix+args),timeout=timeout)
         raw=decode_pve_output(out.read(2*1024*1024));errors=decode_pve_output(err.read(65536))
         code=out.channel.recv_exit_status()
@@ -46,7 +46,7 @@ class ClientPVE:
             raise domain.Conflict('Proxmox a refusé cette opération. Consulter le journal administrateur.')
         return raw
     def api(self,method,suffix='',**params):
-        path=suffix if suffix.startswith(('/nodes/','/cluster/')) else self.base+suffix
+        path=suffix if suffix.startswith(('/nodes/','/cluster/','/storage/')) else self.base+suffix
         args=['pvesh',method,path,'--output-format','json']
         for k,v in params.items():args+=['--'+k,str(int(v) if isinstance(v,bool) else v)]
         run=self.client.get('_operation_run',self.client.get('id') or ident())

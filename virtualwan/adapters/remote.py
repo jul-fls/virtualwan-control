@@ -13,6 +13,9 @@ import hashlib
 if 'decode_external_output' not in globals():
     from virtualwan.text import decode_external_output
 
+if 'os_user_data' not in globals():
+    from virtualwan.guest_os import os_user_data,os_network_data,freebsd_probe_code
+
 if 'ipv6_settings' not in globals():
     from virtualwan.ipv6 import ipv6_settings,ipv6_address,ipv6_validate_address,ipv6_link_local,ipv6_network_data,ipv6_cloud_files
 
@@ -231,6 +234,9 @@ def main():
     elif action in ('pve_retire_check','pve_retire_stop','pve_retire_destroy','pve_retire_unregister','pve_retire_detach'):
         import fcntl,time
         client=q['client'];vmid=int(client['vmid'])
+        if client.get('private_iso'):
+            storage=client.get('private_iso_storage','')
+            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,31}',storage) or not re.fullmatch(re.escape(storage)+r':iso/virtualwan-'+str(vmid)+r'-client-[a-f0-9]{32}\.iso',client['private_iso']):raise ValueError('Private ISO ownership differs')
         if vmid==int(p['template']):raise ValueError('Template deletion forbidden')
         registry_path=Path('/etc/pve/virtualwan-isolation.json');registry=json.loads(registry_path.read_text(encoding='utf-8-sig'))
         reg=registry.get('segments',{}).get(p['isolation_segment']) if p.get('isolation_segment') else registry
@@ -299,6 +305,13 @@ def main():
                 if not detached:
                     manifest.write_text(json.dumps({'client':client,'cicustom':conf.get('cicustom','')}));manifest.chmod(0o600)
                 task('delete',f'/nodes/{node}/qemu/{vmid}')
+            iso=client.get('private_iso')
+            if iso:
+                storage=client.get('private_iso_storage','')
+                if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,31}',storage) or not re.fullmatch(re.escape(storage)+r':iso/virtualwan-'+str(vmid)+r'-client-[a-f0-9]{32}\.iso',iso):raise ValueError('Private ISO ownership differs')
+                target=Path(run('pvesm','path',iso).strip())
+                if not target.is_absolute() or target.name!=iso.split('/')[-1]:raise ValueError('Private ISO path differs')
+                target.unlink(missing_ok=True);target.with_name(target.name+'.part').unlink(missing_ok=True)
             if manifest.exists():
                 saved=json.loads(manifest.read_text(encoding='utf-8-sig'))
                 if not matching(saved['client']):raise ValueError('Snippet recovery ownership differs')
@@ -426,11 +439,13 @@ def main():
             network = json.loads((Path(p['snippet_directory']) / f'virtualwan-{vmid}-network.yaml').read_text(encoding='utf-8-sig'))
             if network['config'][0]['mac_address'] != mac.lower() or network['config'][0]['subnets'][0]['address'] != q['ip'] + '/32':
                 raise ValueError('Existing VM network snippet conflicts')
-            if q.get('ipv6') and network!=ipv6_network_data(q['guest'],q['ip'],mac,q['ipv6']):raise ValueError('Existing dual-stack snippet differs')
+            if q.get('ipv6') and network!=os_network_data(q['guest'],q['ip'],mac,q['ipv6']):raise ValueError('Existing dual-stack snippet differs')
             register_isolation(p,q,vmid,mac)
             emit({'existing': True, 'mac': mac, 'config': api(p, f'qemu/{vmid}/config')})
             return
-        run('qm', 'clone', str(p['template']), vmid, '--full', '1', '--storage', p['disk_storage'], '--name', q['fqdn'])
+        if q['guest'].get('os_family')=='custom':
+            run('qm','create',vmid,'--name',q['fqdn'],'--memory',str(p['memory_mb']),'--cores',str(p['cores']),'--scsihw','virtio-scsi-pci','--scsi0',p['disk_storage']+':'+str(p['disk_gb']),'--net0','virtio,bridge='+p['bridge'],'--ide2',p['disk_storage']+':cloudinit','--agent','enabled=1','--boot','order=scsi0')
+        else:run('qm', 'clone', str(p['template']), vmid, '--full', '1', '--storage', p['disk_storage'], '--name', q['fqdn'])
         run('qm', 'set', vmid, '--description', marker)
         cfg = api(p, f'qemu/{vmid}/config')
         mac = re.search(r'virtio=([0-9A-Fa-f:]{17})', cfg['net0']).group(1)
@@ -443,11 +458,11 @@ def main():
             user['hashed_passwd'] = run('openssl', 'passwd', '-6', '-stdin', input=q['guest_password'] + '\n').strip()
         user_data = {'users': [user], 'disable_root': True, 'ssh_pwauth': auth in ('password', 'both'), 'chpasswd': {'expire': False}, 'fqdn': q['fqdn'], 'hostname': q['fqdn'], 'prefer_fqdn_over_hostname': True}
         user_data['packages']=['keyboard-configuration','console-setup']
-        network=ipv6_network_data(g,q['ip'],mac,q.get('ipv6'))
+        network=os_network_data(g,q['ip'],mac,q.get('ipv6'))
         user_data['write_files']=[{'path':'/etc/default/grub.d/99-virtualwan-console.cfg','permissions':'0644','content':'GRUB_TERMINAL=console\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} console=tty0"\n'}]
         user_data['write_files'].append({'path':'/etc/default/keyboard','permissions':'0644','content':'XKBMODEL="pc105"\nXKBLAYOUT="fr"\nXKBVARIANT=""\nXKBOPTIONS=""\nBACKSPACE="guess"\n'})
         user_data['runcmd']=[['setupcon','--force'],['sh','-c','command -v update-grub >/dev/null && update-grub || true'],['systemctl','enable','--now','getty@tty1.service']]
-        if q.get('ipv6'):user_data['write_files']+=ipv6_cloud_files(g['interface'])
+        user_data=os_user_data(g,q['fqdn'],q['ip'],mac,{'username':g['username'],'ssh_auth':auth,'public_key':q.get('public_key','') if auth in ('key','both') else ''},user.get('hashed_passwd',''),q.get('ipv6'))
         refs = []
         for suffix, data in (('network', json.dumps(network, indent=2)), ('user', '#cloud-config\n' + json.dumps(user_data, indent=2))):
             name = f'virtualwan-{vmid}-{suffix}.yaml'
@@ -458,6 +473,8 @@ def main():
             refs.append(f'{suffix}={p["snippet_storage"]}:snippets/{name}')
         run('qm', 'set', vmid, '--net0', f'virtio={mac},bridge={p["bridge"]}', '--cores', str(p['cores']), '--memory', str(p['memory_mb']), '--ciuser', g['username'], '--tags', 'linux;virtualwan', '--cicustom', ','.join(refs))
         run('qm','set',vmid,'--vga','std','--keyboard','fr')
+        if 'scsi1' in cfg and 'media=cdrom' not in cfg['scsi1']:raise ValueError('Template scsi1 must be free for the client CD drive')
+        run('qm','set',vmid,'--scsi1','none,media=cdrom')
         if 'serial0' in cfg:run('qm','set',vmid,'--delete','serial0')
         run('qm', 'resize', vmid, 'scsi0', str(p['disk_gb']) + 'G')
         run('qm', 'cloudinit', 'update', vmid)
@@ -473,6 +490,10 @@ def main():
         emit({'status': api(p, f'qemu/{vmid}/status/current')['status']})
     elif action == 'pve_verify':
         vmid = str(p['vmid'])
+        if q.get('guest',{}).get('os_family')=='freebsd':
+            result=json.loads(run('qm','guest','exec',vmid,'--','/usr/local/bin/python3','-c',freebsd_probe_code(bool(q.get('ipv6')))))
+            if not result.get('exited') or result.get('exitcode')!=0:raise RuntimeError('FreeBSD cloud-init or QGA not ready')
+            emit(json.loads(result['out-data']));return
         # Query addresses and routing through QGA, not untrusted user startup code.
         code = "import json,subprocess; r=lambda *a:subprocess.check_output(a,text=True); print(json.dumps({'addresses':json.loads(r('ip','-j','-4','addr')), 'routes':json.loads(r('ip','-j','-4','route')), 'dns':open('/etc/resolv.conf').read(), 'hostname':r('hostname').strip(), 'ssh_fingerprint':r('ssh-keygen','-lf','/etc/ssh/ssh_host_ed25519_key.pub').strip(), 'egress':r('curl','-4','-fsS','--max-time','15','https://api.ipify.org').strip()}))"
         result = json.loads(run('qm', 'guest', 'exec', vmid, '--', 'python3', '-c', code))

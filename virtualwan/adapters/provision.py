@@ -121,7 +121,7 @@ class Remote:
         self.path = '/tmp/virtualwan-provision-' + journal.run_id + '.py'
         self.log.event('ssh.script.upload.begin', host=cfg['host'], path=self.path)
         with self.sftp.file(self.path, 'wx') as f:
-            f.write(Path(__file__).parents[1].joinpath('text.py').read_bytes()+b'\n'+Path(__file__).parents[1].joinpath('ipv6.py').read_bytes()+b'\n'+Path(__file__).with_name('remote.py').read_bytes())
+            f.write(Path(__file__).parents[1].joinpath('text.py').read_bytes()+b'\n'+Path(__file__).parents[1].joinpath('ipv6.py').read_bytes()+b'\n'+Path(__file__).parents[1].joinpath('guest_os.py').read_bytes()+b'\n'+Path(__file__).with_name('remote.py').read_bytes())
         self.sftp.chmod(self.path, 0o600)
         self.log.event('ssh.script.upload.end', host=cfg['host'], path=self.path)
         if cfg.get('sudo'):
@@ -382,7 +382,7 @@ def orchestrate(cfg, mode, log, save_config=None):
         if not isinstance(p[name], int) or p[name] <= 0:
             raise ValueError('Invalid PVE resource: ' + name)
     public_key = ''
-    if g['ssh_auth'] in ('key', 'both'):
+    if g['ssh_auth'] in ('key', 'both') and g.get('os_family')!='custom':
         public_key = Path(g['ssh_public_key_file']).read_text(encoding='utf-8-sig').strip()
         if not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?', public_key):
             raise ValueError('Expected one SSH PUBLIC key')
@@ -425,7 +425,7 @@ def orchestrate(cfg, mode, log, save_config=None):
         if v6:
             sources={}
             for name in ('public-policy.py','isolation-service.py'):
-                source=Path(__file__).parents[2].joinpath('tools',name).read_bytes()
+                source=Path(__file__).parents[2].joinpath('tools',name).read_text(encoding='utf-8-sig').encode('utf-8')
                 sources[name]={'base64':base64.b64encode(source).decode(),'sha256':hashlib.sha256(source).hexdigest()}
             pve.call('pve_ipv6_prepare',pve=p,ipv6=v6,sources=sources)
         guest_password = secret(g['password_env']) if g['ssh_auth'] in ('password', 'both') else ''
@@ -435,7 +435,7 @@ def orchestrate(cfg, mode, log, save_config=None):
         cf.ensure(fqdn, ip,**({'ipv6':v6['address']} if v6 else {}))
         wait_dns(fqdn, ip, log)
         ovh.ensure(ip, fqdn)
-        router_source=(Path(__file__).parents[2]/'tools/virtualwan-router.py').read_bytes()
+        router_source=(Path(__file__).parents[2]/'tools/virtualwan-router.py').read_text(encoding='utf-8-sig').encode('utf-8')
         vps.call('vps_apply', path=cfg['vps']['config_path'], primary_ip=cfg['vps']['primary_ip'], ip=ip,
                  source_base64=base64.b64encode(router_source).decode(),source_sha256=hashlib.sha256(router_source).hexdigest())
         pf.configure(pf.snapshot('pfsense.pre-change'), ip, fqdn, vm['mac'])
@@ -451,7 +451,7 @@ def orchestrate(cfg, mode, log, save_config=None):
             deadline = time.monotonic() + 180
             while True:
                 try:
-                    verify_guest(pve.call('pve_verify', pve=p,**({'ipv6':True} if v6 else {})), cfg, fqdn, log)
+                    verify_guest(pve.call('pve_verify', pve=p,guest=g,**({'ipv6':True} if v6 else {})), cfg, fqdn, log)
                     break
                 except (RuntimeError, ValueError) as e:
                     if time.monotonic() >= deadline:
