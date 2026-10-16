@@ -39,7 +39,7 @@ def write(path, text, mode=0o600):
             os.unlink(tmp)
 
 def load(path):
-    c = json.loads(Path(path).read_text())
+    c = json.loads(Path(path).read_text(encoding='utf-8-sig'))
     required = {'primary_ip', 'wan_interface', 'wireguard_interface',
                 'listen_port', 'mtu', 'tunnel_address', 'peer_address',
                 'peer_public_key', 'additional_ips'}
@@ -131,7 +131,7 @@ def firewall(c):
 '''
 
 def apply(c):
-    state = json.loads(STATE.read_text()) if STATE.exists() else None
+    state = json.loads(STATE.read_text(encoding='utf-8-sig')) if STATE.exists() else None
     preflight(c, state)
     exists = bool(run('nft', 'list', 'table', 'inet', 'virtualwan', check=False))
     rules = ('delete table inet virtualwan\n' if exists else '') + firewall(c)
@@ -148,7 +148,7 @@ def apply(c):
     keypath = ROOT / 'server.key'
     if not keypath.exists():
         write(keypath, run('wg', 'genkey') + '\n')
-    private = keypath.read_text().strip()
+    private = keypath.read_text(encoding='utf-8-sig').strip()
     text = f"[Interface]\nAddress = {c['tunnel_address']}\nListenPort = {c['listen_port']}\nPrivateKey = {private}\nMTU = {c['mtu']}\nTable = off\n"
     if c['peer_public_key']:
         allowed = [c['peer_address'] + '/32'] + [x + '/32' for x in c['additional_ips']]
@@ -221,7 +221,7 @@ def rollback():
     if not STATE.exists():
         print('Nothing to roll back')
         return
-    state = json.loads(STATE.read_text())
+    state = json.loads(STATE.read_text(encoding='utf-8-sig'))
     run('systemctl', 'disable', 'virtualwan.service', check=False)
     down()
     for ip in state['config']['additional_ips']+state['config'].get('inactive_ips',[]):
@@ -236,7 +236,7 @@ def rollback():
     print('Managed networking removed; original sysctls restored.')
 
 def status(c):
-    public = run('wg', 'pubkey', input=(ROOT / 'server.key').read_text())
+    public = run('wg', 'pubkey', input=(ROOT / 'server.key').read_text(encoding='utf-8-sig'))
     print('VPS public key:', public)
     print('Peer configured:', bool(c['peer_public_key']))
     print(run('ip', '-4', 'route', 'get', '1.1.1.1'))

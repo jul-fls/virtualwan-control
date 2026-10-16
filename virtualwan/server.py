@@ -27,7 +27,7 @@ class Application:
                     self.app.extensions['control'].stop.set();await send({'type':'lifespan.shutdown.complete'});return
         if scope['type']!='websocket':return await self.http(scope,receive,send)
         from http.cookies import SimpleCookie
-        headers={k.decode().lower():v.decode() for k,v in scope['headers']}
+        headers={k.decode('latin-1').lower():v.decode('latin-1') for k,v in scope['headers']}
         origin=os.environ.get('VWAN_PUBLIC_URL','http://localhost:8080').rstrip('/')
         if scope['path'] not in ('/ws/console','/ws/admin-console') or headers.get('origin')!=origin or urlparse('http://'+headers.get('host','')).hostname!=urlparse(origin).hostname:
             await send({'type':'websocket.close','code':1008});return

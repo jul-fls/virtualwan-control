@@ -22,7 +22,7 @@ def check_aliases(cf,ip,fqdn,client,log,preflight=False,legacy_name=None):
 
 
 def main():
-    path=Path(sys.argv[1]);cfg=json.loads(path.read_text());log=Journal(cfg)
+    path=Path(sys.argv[1]);cfg=json.loads(path.read_text(encoding='utf-8-sig'));log=Journal(cfg)
     ip=cfg['public_ip'];client=cfg.get('retire_client');mode=cfg.get('lifecycle_mode','delete_release')
     if mode not in ('release','delete','delete_release'):raise ValueError('Unknown lifecycle mode')
     release=not client or mode!='delete'

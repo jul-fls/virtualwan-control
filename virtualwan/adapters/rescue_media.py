@@ -1,9 +1,14 @@
 """Pinned-SSH helper: plaintext password is sent on stdin only, never in argv/logs."""
-SOURCE = r'''
+from pathlib import Path
+from ..text import decode_external_output
+
+SOURCE = Path(__file__).parents[1].joinpath('text.py').read_text(encoding='utf-8')+'\n'+r'''
 import ipaddress,json,os,re,subprocess,sys,tempfile
 from pathlib import Path
 p=json.load(sys.stdin)
-def run(*args,**kw):return subprocess.run(args,check=True,capture_output=True,text=True,**kw).stdout.strip()
+def run(*args,**kw):
+ if isinstance(kw.get('input'),str):kw['input']=kw['input'].encode('utf-8')
+ return decode_external_output(subprocess.run(args,check=True,capture_output=True,**kw).stdout).strip()
 vmid=str(int(p['vmid']));session=p['session']
 assert re.fullmatch(r'[a-f0-9]{32}',session)
 storage=p['storage'];assert re.fullmatch(r'[A-Za-z0-9_-]+',storage)
@@ -50,7 +55,7 @@ def media(pve,action,*,iso=None,password=None,saved=None):
     if action in ('create','inspect'):payload.update(iso=iso,password=password,mac=pve.client['mac'].lower(),ip=pve.client['ip'])
     stdin,out,err=pve.ssh.exec_command(shlex.join(pve.prefix+['python3','-c',SOURCE]),timeout=60)
     stdin.write(json.dumps(payload));stdin.channel.shutdown_write()
-    raw=out.read(65536).decode();errors=err.read(65536).decode()
+    raw=decode_external_output(out.read(65536));errors=decode_external_output(err.read(65536))
     if out.channel.recv_exit_status():
         pve.store.event(pve.client.get('_operation_run',pve.client['id']),'client.rescue.media.failed',media_action=action,stderr=errors)
         raise domain.Conflict('La préparation du média rescue a échoué. Consulter le journal de cette opération.')

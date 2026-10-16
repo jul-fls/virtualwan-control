@@ -105,7 +105,7 @@ def apply_environment(control):
 
 def flat_profile_fields():
     """Every example leaf has a scalar variable; arrays use comma-separated values."""
-    example=json.loads((Path(__file__).parent.parent/'examples/profile.json').read_text())
+    example=json.loads((Path(__file__).parent.parent/'examples/profile.json').read_text(encoding='utf-8-sig'))
     fields={}
     for name,value in example.items():
         if name=='config':

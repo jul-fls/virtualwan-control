@@ -46,14 +46,14 @@ def segments(registry):
     return result
 
 def apply(force=False):
-    registry=json.loads(REGISTRY.read_text());all_segments=segments(registry);node=run('hostname','-s').strip()
+    registry=json.loads(REGISTRY.read_text(encoding='utf-8-sig'));all_segments=segments(registry);node=run('hostname','-s').strip()
     configurations=[{**c,**c['nodes'][node],'table_name':table_name(name)} for name,c in all_segments.items() if node in c['nodes']]
     if not configurations:raise ValueError('Node not registered')
     tables=[c['table_name'] for c in configurations];data=''.join(module().generate(c) for c in configurations)
     STATE.mkdir(exist_ok=True);digest=hashlib.sha256(data.encode()).hexdigest()
-    previous=(STATE/'digest').read_text() if (STATE/'digest').exists() else None
+    previous=(STATE/'digest').read_text(encoding='utf-8-sig') if (STATE/'digest').exists() else None
     if not force and digest==previous and all(subprocess.run(['nft','list','table','bridge',t],capture_output=True).returncode==0 for t in tables):return
-    old=json.loads((STATE/'tables.json').read_text()) if (STATE/'tables.json').exists() else []
+    old=json.loads((STATE/'tables.json').read_text(encoding='utf-8-sig')) if (STATE/'tables.json').exists() else []
     for t in set(old)-set(tables):
         if not re.fullmatch(r'virtualwan_isolation(?:_[a-f0-9]{12})?',t):raise ValueError('Invalid owned table')
         if subprocess.run(['nft','list','table','bridge',t],capture_output=True).returncode==0:data+='delete table bridge '+t+'\n'
@@ -62,21 +62,21 @@ def apply(force=False):
     print('Isolation loaded:',digest)
 
 def pre_start(vmid):
-    registry=json.loads(REGISTRY.read_text());node=run('hostname','-s').strip()
+    registry=json.loads(REGISTRY.read_text(encoding='utf-8-sig'));node=run('hostname','-s').strip()
     found=[(c,v) for c in segments(registry).values() for v in c['clients'] if v['vmid']==vmid]
     if len(found)!=1:raise ValueError('VM identity is not registered')
     c,v=found[0]
     if node not in c['nodes']:raise ValueError('Destination node does not host this public segment')
     files=list(Path('/etc/pve/nodes').glob(f'*/qemu-server/{vmid}.conf'))
     if len(files)!=1:raise ValueError('Ambiguous/missing VM configuration')
-    conf=files[0].read_text();match=re.search(r'^net0: (.+)$',conf,re.M)
+    conf=files[0].read_text(encoding='utf-8-sig');match=re.search(r'^net0: (.+)$',conf,re.M)
     opts=dict(x.split('=',1) for x in match[1].split(',') if '=' in x) if match else {}
     if opts.get('bridge')!=c['nodes'][node]['bridge'] or opts.get('virtio','').lower()!=v['mac'].lower() or 'tag' in opts or 'trunks' in opts:raise ValueError('Unexpected client network identity')
     if re.search(r'^(hostpci|usb|virtiofs|args|net[1-9])',conf,re.M):raise ValueError('Additional NIC/passthrough/shared filesystem/custom QEMU args require review')
     apply()
 
 def register(args):
-    registry=json.loads(REGISTRY.read_text());items=segments(registry)
+    registry=json.loads(REGISTRY.read_text(encoding='utf-8-sig'));items=segments(registry)
     if args.segment not in items:raise ValueError('Unknown segment; bootstrap it before provisioning')
     target=registry if args.segment=='legacy' else registry['segments'][args.segment]
     item={'vmid':args.vmid,'mac':args.mac.lower(),'public_ip':args.public_ip,'next_hop':args.next_hop}
@@ -102,7 +102,7 @@ def main():
         elif args.action=='pre-start':pre_start(args.vmid)
         else:
             apply();node=run('hostname','-s').strip()
-            for name,c in segments(json.loads(REGISTRY.read_text())).items():
+            for name,c in segments(json.loads(REGISTRY.read_text(encoding='utf-8-sig'))).items():
                 if node in c['nodes']:print(run('nft','list','table','bridge',table_name(name)))
 
 if __name__=='__main__':main()

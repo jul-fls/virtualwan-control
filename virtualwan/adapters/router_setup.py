@@ -8,7 +8,7 @@ from .provision import Journal,Remote
 
 
 def main():
-    config=Path(sys.argv[1]);cfg=json.loads(config.read_text())
+    config=Path(sys.argv[1]);cfg=json.loads(config.read_text(encoding='utf-8-sig'))
     journal=Journal(cfg)
     source=(Path(__file__).parents[2]/'tools/virtualwan-router.py').read_bytes()
     # In the container tools lives next to virtualwan, not inside the package.

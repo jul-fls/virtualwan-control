@@ -5,7 +5,7 @@ import sys
 from .provision import Journal,Remote
 
 def main():
-    config=json.loads(Path(sys.argv[1]).read_text());journal=Journal(config)
+    config=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8-sig'));journal=Journal(config)
     # Keep protocol JSON on stdout; SDK progress goes to stderr.
     from contextlib import redirect_stdout
     with redirect_stdout(sys.stderr):

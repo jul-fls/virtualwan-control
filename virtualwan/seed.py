@@ -5,7 +5,7 @@ import time
 from .store import ident
 
 def seed(control):
-    example=json.loads((Path(__file__).parent.parent/'examples'/'profile.json').read_text())
+    example=json.loads((Path(__file__).parent.parent/'examples'/'profile.json').read_text(encoding='utf-8-sig'))
     example.update(name='Routeur Europe · démo',ready=True)
     example['config']['ovh']['expected_service']='vps-demo.example.net'
     key=control.add_profile(example)

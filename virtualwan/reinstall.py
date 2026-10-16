@@ -9,9 +9,11 @@ def credentials(body,guest):
     auth=body.get('ssh_auth','key');username=body.get('username',guest.get('username','debian'))
     if auth not in ('key','password','both'):raise ValueError('Méthode SSH invalide.')
     if not isinstance(username,str) or username=='root' or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}',username):raise ValueError('Utilisateur Linux non-root valide requis.')
-    key=body.get('public_key','').strip();password=body.get('password','')
+    key=body.get('public_key','');password=body.get('password','')
+    if auth in ('key','both') and not isinstance(key,str):raise ValueError('Clé SSH publique invalide.')
+    key=key.strip() if isinstance(key,str) else ''
     if auth in ('key','both') and not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?',key):raise ValueError('Clé SSH publique invalide.')
-    if auth in ('password','both') and (not isinstance(password,str) or not 12<=len(password)<=256 or '\n' in password or '\x00' in password):raise ValueError('Mot de passe invité de 12 à 256 caractères, sur une seule ligne.')
+    if auth in ('password','both') and (not isinstance(password,str) or not 12<=len(password)<=256 or any(c in password for c in ('\n','\r','\x00'))):raise ValueError('Mot de passe invité de 12 à 256 caractères, sur une seule ligne.')
     return {'username':username,'ssh_auth':auth,'public_key':key if auth in ('key','both') else '', 'password':password if auth in ('password','both') else ''}
 
 

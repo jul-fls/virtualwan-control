@@ -23,6 +23,7 @@ import paramiko
 import requests
 
 from .pfsense import PfSense
+from ..text import decode_external_output
 from ..ipv6 import ipv6_settings,ipv6_validate_address
 
 
@@ -114,13 +115,13 @@ class Remote:
         self.ssh = paramiko.SSHClient()
         self.ssh.load_host_keys(cfg['known_hosts'])
         self.ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
-        self.ssh.connect(cfg['host'], port=cfg['port'], username=cfg['username'], password=secret(cfg['password_env']) if not cfg.get('private_key') else None, key_filename=cfg.get('private_key'), passphrase=secret(cfg['key_passphrase_env']) if cfg.get('key_passphrase_env') else None, look_for_keys=False, allow_agent=False, timeout=15, banner_timeout=15)
+        self.ssh.connect(cfg['host'], port=cfg['port'], username=cfg['username'], password=secret(cfg['password_env']) if not cfg.get('private_key') else None, key_filename=cfg.get('private_key'), passphrase=secret(cfg['key_passphrase_env']) if cfg.get('key_passphrase_env') else None, look_for_keys=False, allow_agent=False, timeout=15, banner_timeout=15, auth_timeout=15)
         self.log.event('ssh.connected', host=cfg['host'], port=cfg['port'], username=cfg['username'], key_type=self.ssh.get_transport().get_remote_server_key().get_name())
         self.sftp = self.ssh.open_sftp()
         self.path = '/tmp/virtualwan-provision-' + journal.run_id + '.py'
         self.log.event('ssh.script.upload.begin', host=cfg['host'], path=self.path)
         with self.sftp.file(self.path, 'wx') as f:
-            f.write(Path(__file__).parents[1].joinpath('ipv6.py').read_bytes()+b'\n'+Path(__file__).with_name('remote.py').read_bytes())
+            f.write(Path(__file__).parents[1].joinpath('text.py').read_bytes()+b'\n'+Path(__file__).parents[1].joinpath('ipv6.py').read_bytes()+b'\n'+Path(__file__).with_name('remote.py').read_bytes())
         self.sftp.chmod(self.path, 0o600)
         self.log.event('ssh.script.upload.end', host=cfg['host'], path=self.path)
         if cfg.get('sudo'):
@@ -145,19 +146,23 @@ class Remote:
         stdin.write(json.dumps({'action': action, 'run_id': self.log.run_id, **payload}))
         stdin.flush()
         stdin.channel.shutdown_write()
-        errors = []
+        errors = [];reader_errors=[]
         def read_events():
-            for line in stderr:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    errors.append(line)
-                else:
-                    self.log.event('remote.step', host=self.cfg['host'], operation=action, details=event)
+            try:
+                # Paramiko's text iterator decodes UTF-8 before our code can
+                # handle a legacy diagnostic. Read lines in binary mode instead.
+                with stderr.channel.makefile_stderr('rb') as stream:
+                    for raw in stream:
+                        line=decode_external_output(raw)
+                        try:event=json.loads(line)
+                        except json.JSONDecodeError:errors.append(line)
+                        else:self.log.event('remote.step',host=self.cfg['host'],operation=action,details=event)
+            except Exception as error:reader_errors.append(error)
         reader = threading.Thread(target=read_events)
         reader.start()
-        result = stdout.read().decode()
+        result = decode_external_output(stdout.read())
         reader.join()
+        if reader_errors:raise RuntimeError('Lecture du journal SSH interrompue : '+action) from reader_errors[0]
         errors = ''.join(errors)
         rc = stdout.channel.recv_exit_status()
         try:
@@ -378,7 +383,7 @@ def orchestrate(cfg, mode, log, save_config=None):
             raise ValueError('Invalid PVE resource: ' + name)
     public_key = ''
     if g['ssh_auth'] in ('key', 'both'):
-        public_key = Path(g['ssh_public_key_file']).read_text().strip()
+        public_key = Path(g['ssh_public_key_file']).read_text(encoding='utf-8-sig').strip()
         if not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?', public_key):
             raise ValueError('Expected one SSH PUBLIC key')
     log.event('plan', fqdn=fqdn, public_ip=ip, configuration=cfg, steps=['preflight', 'clone stopped', 'Cloudflare A DNS-only', 'DNS propagation', 'OVH reverse', 'VPS route', 'pfSense forms', 'VM start and verify', 'optional reboot'])
@@ -496,7 +501,7 @@ def main():
         log.event('run.failed', error_type=type(e).__name__, error=str(e), recovery='See successful actions and encrypted backups. No broad automatic rollback or deletion of VM/DNS/pfSense objects.')
         return 1
     finally:
-        if lock and lock.exists() and lock.read_text() == log.run_id:
+        if lock and lock.exists() and lock.read_text(encoding='utf-8-sig') == log.run_id:
             lock.unlink()
         print('Run journal: ' + str(log.directory / 'run.jsonl'))
 

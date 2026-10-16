@@ -21,7 +21,8 @@ def public_ip(value):
 
 def positive(value,maximum):
     if isinstance(value,bool):raise ValueError('Nombre entier requis.')
-    integer=int(value)
+    try:integer=int(value)
+    except (TypeError,ValueError,OverflowError):raise ValueError('Nombre entier requis.') from None
     if str(integer)!=str(value) or not 1<=integer<=maximum:raise ValueError('Valeur hors limites.')
     return integer
 
@@ -34,7 +35,8 @@ def model(data):
 
 
 def label(value):
-    value=str(value).strip()
+    if not isinstance(value,str):raise ValueError('Nom invalide.')
+    value=value.strip()
     if not 1<=len(value)<=100 or any(ord(c)<32 for c in value):raise ValueError('Nom invalide.')
     return value
 
@@ -66,6 +68,7 @@ def profile(data):
     if v6:
         if v6.get('address'):raise ValueError('IPv6 address is allocated per VM, not in a profile.')
         config['ipv6']=v6
+    if not isinstance(data.get('ready',False),bool):raise ValueError('État prêt du profil : booléen requis.')
     capacity=positive(data.get('capacity',16),16 if data.get('provider','ovh')=='ovh' else 256)
     return {'name':label(data['name']),'provider':data.get('provider','ovh'),
             'capacity':capacity,'ready':bool(data.get('ready',False)),'config':config}

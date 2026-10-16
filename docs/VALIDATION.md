@@ -590,3 +590,6 @@ console/fullscreen, passkeys, MFA, recovery and password change).
   tests locaux du backend ; le test Proxmox jetable utilise IPv4 et une clé SSH.
   Le réseau Internet du VPS jetable reste déconnecté : aucune validation de service
   SSH extérieur ou d’accès Internet de ce nouvel invité n’est revendiquée.
+
+
+La revue locale avant publication et ses corrections sont décrites dans [REVUE-CODE.md](REVUE-CODE.md). Les régressions sont reproduites dans `test_audit_regressions.py`, `test_pve_encoding.py` et `browser-audit.cjs`.

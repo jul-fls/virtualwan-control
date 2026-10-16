@@ -52,26 +52,35 @@ def create_app(test_config=None):
         if origin and origin.rstrip('/') not in (url,request.host_url.rstrip('/')):abort(403)
         if request.headers.get('Sec-Fetch-Site')=='cross-site':abort(403)
 
+    def json_object():
+        if not request.is_json:abort(415)
+        if not isinstance(request.get_json(),dict):raise ValueError('Un objet JSON est requis.')
+
     @app.before_request
     def guard():
         if urlparse('http://'+request.host).hostname not in allowed:abort(400)
         if request.method not in ('GET','HEAD','OPTIONS'):origin_check()
-        if not request.path.startswith('/api/') or request.path=='/api/login':return
+        if not request.path.startswith('/api/'):return
+        if request.path=='/api/login':
+            if request.method=='POST':json_object()
+            return
         if request.path.startswith('/api/portal/'):
-            if request.path in ('/api/portal/login','/api/portal/passkey/login/begin','/api/portal/passkey/login/complete'):return
+            if request.path in ('/api/portal/login','/api/portal/passkey/login/begin','/api/portal/passkey/login/complete'):
+                if request.method=='POST':json_object()
+                return
             g.client=app.extensions['accounts'].authenticate(request.cookies.get('vwan_client',''))
             if not g.client:abort(401)
             if request.method not in ('GET','HEAD'):
-                if not hmac.compare_digest(request.headers.get('X-CSRF-Token',''),g.client['csrf']):abort(403)
-                if not request.is_json:abort(415)
+                if not hmac.compare_digest(request.headers.get('X-CSRF-Token','').encode('utf-8'),g.client['csrf'].encode('utf-8')):abort(403)
+                json_object()
             return
         rows=store.rows('SELECT * FROM sessions WHERE token=? AND expires>?',(session_id(),time.time()))
         if not rows:abort(401)
         g.session=rows[0]
         if request.method not in ('GET','HEAD'):
             csrf=request.headers.get('X-CSRF-Token','')
-            if not csrf or not hmac.compare_digest(csrf,g.session['csrf']):abort(403)
-            if not request.is_json:abort(415)
+            if not csrf or not hmac.compare_digest(csrf.encode('utf-8'),g.session['csrf'].encode('utf-8')):abort(403)
+            json_object()
 
     @app.after_request
     def headers(response):
@@ -110,6 +119,7 @@ def create_app(test_config=None):
         if len(attempts[address])>=8:abort(429)
         body=request.get_json();attempts[address].append(now)
         supplied=body.get('password','')
+        if not isinstance(supplied,str):abort(401)
         valid=check_password_hash(hashed,supplied)
         if not valid or body.get('username')!=username:abort(401)
         attempts.pop(address,None);token=secrets.token_urlsafe(32);csrf=secrets.token_urlsafe(32)
@@ -228,7 +238,7 @@ def create_app(test_config=None):
     @app.post('/api/jobs/<key>/cancel')
     def cancel_job(key):return jsonify(control.recover_job(key,'cancel',request.get_json().get('confirmation'))),200
     @app.get('/api/profile-example')
-    def example():return jsonify(json.loads((Path(__file__).parent.parent/'examples'/'profile.json').read_text()))
+    def example():return jsonify(json.loads((Path(__file__).parent.parent/'examples'/'profile.json').read_text(encoding='utf-8-sig')))
     @app.get('/api/profiles/<key>/bootstrap')
     def bootstrap(key):
         from .bootstrap import bundle

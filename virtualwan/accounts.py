@@ -44,7 +44,7 @@ class Accounts:
         with self.store.tx() as db:
             old=db.execute('SELECT * FROM accounts WHERE id=?',(key,)).fetchone()
             if db.execute('SELECT id FROM accounts WHERE email=? AND id!=?',(address,key)).fetchone():raise domain.Conflict('Cet e-mail est déjà utilisé.')
-            enabled=body.get('enabled',True)
+            enabled=body.get('enabled',bool(old['enabled']) if old else True)
             if not isinstance(enabled,bool):raise ValueError('État du compte invalide.')
             hashed=password_hash(body['password']) if body.get('password') else old['password_hash'] if old else password_hash('')
             if old:
@@ -126,10 +126,13 @@ class Accounts:
         key,data=self.consume(body['challenge'],'totp',session['account_id'])
         if data['session']!=session['token']:raise domain.Conflict('Session différente.')
         step=int(time.time()//30);secret=self.store.cipher.decrypt(data['encrypted'].encode()).decode()
-        if not any(hmac.compare_digest(totp(secret,n),str(body.get('code',''))) for n in (step-1,step,step+1)):raise ValueError('Code MFA invalide ; recommencer l’activation.')
+        if not re.fullmatch(r'[0-9]{6}',str(body.get('code',''))):raise ValueError('Code MFA à 6 chiffres requis.')
+        matched=next((n for n in (step-1,step,step+1) if hmac.compare_digest(totp(secret,n),str(body.get('code','')))),None)
+        if matched is None:raise ValueError('Code MFA invalide ; recommencer l’activation.')
         codes=[secrets.token_hex(10) for _ in range(10)]
         with self.store.tx() as db:
-            db.execute('UPDATE accounts SET totp=?,last_totp=?,recovery=? WHERE id=? AND totp IS NULL',(data['encrypted'].encode(),step,json.dumps([hashlib.sha256(c.encode()).hexdigest() for c in codes]),key))
+            changed=db.execute('UPDATE accounts SET totp=?,last_totp=?,recovery=? WHERE id=? AND totp IS NULL',(data['encrypted'].encode(),matched,json.dumps([hashlib.sha256(c.encode()).hexdigest() for c in codes]),key)).rowcount
+            if not changed:raise domain.Conflict('MFA déjà activée depuis une autre demande. Conserver les codes de la première activation.')
             db.execute('DELETE FROM client_sessions WHERE account_id=? AND token!=?',(key,session['token']))
         self.store.event(ident(),'client.mfa.enabled',account_id=key)
         return {'recovery_codes':codes}

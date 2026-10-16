@@ -168,13 +168,13 @@ class Control:
         if not self.demo and not self.allow_provision:raise domain.Conflict('Déploiement réel désactivé par VWAN_ENABLE_PROVISIONING.')
         auth=body.get('ssh_auth','key')
         if auth not in ('key','password','both'):raise ValueError('Méthode SSH invalide.')
-        if auth in ('key','both') and not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?',body.get('public_key','').strip()):raise ValueError('Clé SSH publique invalide.')
-        if auth in ('password','both') and len(body.get('password',''))<12:raise ValueError('Mot de passe invité de 12 caractères minimum.')
+        if auth in ('key','both') and (not isinstance(body.get('public_key',''),str) or not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [^\r\n]*)?',body.get('public_key','').strip())):raise ValueError('Clé SSH publique invalide.')
+        if auth in ('password','both') and (not isinstance(body.get('password'),str) or not 12<=len(body['password'])<=1024 or any(c in body['password'] for c in ('\n','\r','\x00'))):raise ValueError('Mot de passe invité de 12 à 1024 caractères, sur une seule ligne.')
         config=deepcopy(profile['config']);config['pve'].update({k:model[k] for k in ('cores','memory_mb','disk_gb','template')})
         config['pve']['vmid']=None;config['pfsense']['next_hop']=None
         config['guest']['ssh_auth']=auth
         config['guest']['username']=body.get('username',config['guest'].get('username','debian'))
-        if config['guest']['username']=='root' or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}',config['guest']['username']):raise ValueError('Utilisateur Linux non-root valide requis.')
+        if not isinstance(config['guest']['username'],str) or config['guest']['username']=='root' or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}',config['guest']['username']):raise ValueError('Utilisateur Linux non-root valide requis.')
         config['require_client_isolation']=True;config['start_vm']=True
         customer=str(body.get('customer','')).strip()[:150]
         with self.store.tx() as db:
@@ -186,7 +186,7 @@ class Control:
             if self.demo:
                 fqdn=config.get('hostname_pattern','vps-{ipv4_compact}.{domain}').format(ipv4=ip,ipv4_compact=ip.replace('.',''),ipv4_dashed=ip.replace('.','-'),domain=config['domain'])
             else:fqdn=fqdn_for(ip,config['domain'],config.get('hostname_pattern','vps-{ipv4_compact}.{domain}'))
-            payload={'profile_id':profile['id'],'model_id':model['id'],'config':config,'customer':customer,'public_key':body.get('public_key','').strip(),'simulated':self.demo}
+            payload={'profile_id':profile['id'],'model_id':model['id'],'config':config,'customer':customer,'public_key':body.get('public_key','').strip() if auth in ('key','both') else '','simulated':self.demo}
             job=self.store.job('deploy',payload,db)
             if auth in ('password','both'):
                 name='GUEST_PASSWORD_'+job.upper();config['guest']['password_env']=name
@@ -323,14 +323,14 @@ class Control:
     def inspect_clients(self,profile_id,run):
         p=self.store.document('profiles',profile_id)
         if self.demo:return {'simulated':True,'clients':len(self.deployments())}
-        cfg=deepcopy(p['config']);env=os.environ.copy()
+        cfg=deepcopy(p['config']);env=os.environ.copy();env['PYTHONIOENCODING']='utf-8'
         for section in cfg.values():
             if isinstance(section,dict):
                 for name,value in section.items():
                     if name.endswith('_env') and value:
                         secret=self.store.secret_get(value)
                         if secret:env[value]=secret
-        env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip();cfg['backup_key_env']='VWAN_BACKUP_KEY'
+        env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text(encoding='utf-8-sig').strip();cfg['backup_key_env']='VWAN_BACKUP_KEY'
         cfg['pve']['known_hosts']=str(self.store.root/'ssh-known-hosts')
         from .adapters.provision import require_ssh_host_key
         require_ssh_host_key(cfg['pve'])
@@ -340,7 +340,7 @@ class Control:
             cfg['pve']['private_key']=str(path)
         directory=self.store.root/'runs'/run;directory.mkdir(parents=True,exist_ok=True);cfg['log_directory']=str(directory/'observer')
         path=directory/'inspect.json';path.write_text(json.dumps(cfg))
-        result=subprocess.run([sys.executable,'-m','virtualwan.adapters.observe',str(path)],env=env,capture_output=True,text=True,timeout=180)
+        result=subprocess.run([sys.executable,'-m','virtualwan.adapters.observe',str(path)],env=env,capture_output=True,text=True,encoding='utf-8',timeout=180)
         self.store.event(run,'inventory.pve.inspect',exit_code=result.returncode,progress=result.stderr)
         if result.returncode:raise RuntimeError('Lecture PVE refusée ; vérifier accès, clés hôtes et registre d’isolation.')
         clients=json.loads(result.stdout)['clients']
@@ -471,14 +471,14 @@ class Control:
             if not self.allow_provision:raise domain.Conflict('Provisionnement désactivé.')
             run=self.store.root/'runs'/key;run.mkdir(parents=True,exist_ok=True)
             cfg['log_directory']=str(run/'lifecycle');cfg['backup_key_env']='VWAN_BACKUP_KEY'
-            env=os.environ.copy()
+            env=os.environ.copy();env['PYTHONIOENCODING']='utf-8'
             for section in cfg.values():
                 if isinstance(section,dict):
                     for name,value in section.items():
                         if name.endswith('_env') and value:
                             secret=self.store.secret_get(value)
                             if secret:env[value]=secret
-            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip()
+            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text(encoding='utf-8-sig').strip()
             for target in ('pve','vps'):
                 cfg[target]['known_hosts']=str(self.store.root/'ssh-known-hosts')
                 if cfg[target].get('private_key'):
@@ -487,15 +487,15 @@ class Control:
                     cfg[target]['private_key']=str(private)
             path=run/'lifecycle.json'
             if path.exists() and client:
-                saved=json.loads(path.read_text()).get('retire_client',{})
+                saved=json.loads(path.read_text(encoding='utf-8-sig')).get('retire_client',{})
                 if saved.get('vmid')!=cfg['retire_client'].get('vmid') or saved.get('mac')!=cfg['retire_client'].get('mac'):raise domain.Conflict('Retirement run identity changed')
                 for field in ('public_ipv6','ipv6_config'):
                     if saved.get(field) and not cfg['retire_client'].get(field):cfg['retire_client'][field]=saved[field]
             path.write_text(json.dumps(cfg));os.chmod(path,0o600)
-            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.lifecycle',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.lifecycle',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8')
             for line in proc.stdout:self.store.event(key,'lifecycle.progress',message=line.strip())
             if proc.wait():raise RuntimeError('Nettoyage/DNS incomplet : IP en quarantaine. Inspecter le journal avant reprise du même job.')
-            result=json.loads(path.with_suffix('.result.json').read_text())
+            result=json.loads(path.with_suffix('.result.json').read_text(encoding='utf-8-sig'))
         with self.store.tx() as db:
             if client and mode=='release':
                 info={k:v for k,v in client.items() if k not in ('id','ip','profile_id','model_id')}
@@ -565,19 +565,19 @@ class Control:
             # Keep only fields accepted by the router installer.
             cfg['router_setup']={k:cfg['router_setup'][k] for k in ('primary_ip','wan_interface','wireguard_interface','listen_port','mtu','tunnel_address','peer_address','peer_public_key','additional_ips')}
             cfg['router_setup']['inactive_ips']=cfg['router_setup']['additional_ips'];cfg['router_setup']['additional_ips']=[]
-            env=os.environ.copy()
+            env=os.environ.copy();env['PYTHONIOENCODING']='utf-8'
             for section in cfg.values():
                 if isinstance(section,dict):
                     for name,value in section.items():
                         if name.endswith('_env') and value:
                             credential=self.store.secret_get(value)
                             if credential:env[value]=credential
-            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip()
+            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text(encoding='utf-8-sig').strip()
             path=run/'router-setup.json';path.write_text(json.dumps(cfg));os.chmod(path,0o600)
-            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.router_setup',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            proc=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.router_setup',str(path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8')
             for line in proc.stdout:self.store.event(key,'router.setup.progress',message=line.strip())
             if proc.wait():raise RuntimeError('Installation interrompue ; vérifier le journal et le rollback avant une nouvelle action.')
-            result=json.loads(path.with_suffix('.result.json').read_text())
+            result=json.loads(path.with_suffix('.result.json').read_text(encoding='utf-8-sig'))
         # Network at home must be verified separately; never mark it ready by SSH success.
         self.store.event(key,'router.setup.complete',**result)
         return result
@@ -592,14 +592,14 @@ class Control:
             if ipv6_settings(cfg.get('ipv6')):cfg['ipv6']['address']=ipv6_address(cfg['ipv6'],cfg['pve']['vmid'])
             result={'simulated':True,'mac':mac,'vmid':cfg['pve']['vmid'],'next_hop':cfg['pfsense']['next_hop']}
         else:
-            env=os.environ.copy()
+            env=os.environ.copy();env['PYTHONIOENCODING']='utf-8'
             for section in cfg.values():
                 if isinstance(section,dict):
                     for name,value in section.items():
                         if name.endswith('_env') and value:
                             credential=self.store.secret_get(value)
                             if credential:env[value]=credential
-            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text().strip()
+            env['VWAN_BACKUP_KEY']=(self.store.root/'master.key').read_text(encoding='utf-8-sig').strip()
             keyfile=run/'guest-key.pub';keyfile.write_text(payload.get('public_key',''));cfg['guest']['ssh_public_key_file']=str(keyfile)
             for item in ('vps','pve'):
                 cfg[item]['known_hosts']=str(self.store.root/'ssh-known-hosts')
@@ -608,18 +608,18 @@ class Control:
                     if not path.is_relative_to(self.store.root):raise ValueError('La clé privée doit être montée sous le répertoire data.')
                     cfg[item]['private_key']=str(path)
             if config_path.exists():
-                saved=json.loads(config_path.read_text())
+                saved=json.loads(config_path.read_text(encoding='utf-8-sig'))
                 if saved.get('public_ip')!=ip:raise domain.Conflict('Configuration du run en conflit.')
                 cfg=saved
             config_path.write_text(json.dumps(cfg,indent=2))
             self.store.event(key,'provisioning.process.begin',configuration=cfg)
-            process=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.provision','apply','--config',str(config_path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            process=subprocess.Popen([sys.executable,'-m','virtualwan.adapters.provision','apply','--config',str(config_path)],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8')
             tail=[]
             for line in process.stdout:
                 tail.append(line.strip());tail=tail[-30:]
                 self.store.event(key,'provisioning.progress',message=line.strip())
             code=process.wait()
-            cfg=json.loads(config_path.read_text())
+            cfg=json.loads(config_path.read_text(encoding='utf-8-sig'))
             if ipv6_settings(cfg.get('ipv6')) and cfg['ipv6'].get('address'):
                 with self.store.tx() as db:
                     row=db.execute('SELECT data FROM deployments WHERE ip=?',(ip,)).fetchone();saved_info=json.loads(row['data'])
@@ -627,7 +627,7 @@ class Control:
                     db.execute('UPDATE deployments SET data=? WHERE ip=?',(json.dumps(saved_info),ip))
             if code:raise RuntimeError('Provisionnement interrompu ; consulter le journal et les snapshots chiffrés. L’IP reste en quarantaine.')
             journals=list((run/'provisioning').glob('*/run.jsonl'))
-            events=[json.loads(line) for line in journals[-1].read_text().splitlines()]
+            events=[json.loads(line) for line in journals[-1].read_text(encoding='utf-8-sig').splitlines()]
             created=next(e for e in events if e['action']=='remote.end' and e.get('operation')=='pve_create')
             # Remote journal payload uses result; fail closed if the adapter changes its schema.
             mac=created['result']['mac']
@@ -691,9 +691,9 @@ class Control:
         if not host or not recipient:return
         import smtplib
         from email.message import EmailMessage
-        message=EmailMessage();message['From']=os.environ['VWAN_SMTP_FROM'];message['To']=recipient;message['Subject']='Virtualwan : achat en attente de confirmation'
-        message.set_content('Un devis est prêt. Connectez-vous à l’interface pour examiner les prix/contrats et confirmer.\n'+os.environ.get('VWAN_PUBLIC_URL','http://localhost:8080')+'/#purchases\nAucun achat n’est approuvé depuis un lien GET. Référence : '+purchase_id)
         try:
+            message=EmailMessage();message['From']=os.environ['VWAN_SMTP_FROM'];message['To']=recipient;message['Subject']='Virtualwan : achat en attente de confirmation'
+            message.set_content('Un devis est prêt. Connectez-vous à l’interface pour examiner les prix/contrats et confirmer.\n'+os.environ.get('VWAN_PUBLIC_URL','http://localhost:8080')+'/#purchases\nAucun achat n’est approuvé depuis un lien GET. Référence : '+purchase_id)
             with smtplib.SMTP(host,int(os.environ.get('VWAN_SMTP_PORT','587')),timeout=20) as smtp:
                 smtp.starttls()
                 if os.environ.get('VWAN_SMTP_USER'):smtp.login(os.environ['VWAN_SMTP_USER'],os.environ['VWAN_SMTP_PASSWORD'])
@@ -705,12 +705,16 @@ class Control:
         def loop():
             last_poll=0
             while not self.stop.is_set():
-                if not self.demo and time.time()-last_poll>300:
-                    last_poll=time.time()
-                    for purchase in self.store.rows("SELECT id FROM purchases WHERE state IN ('awaiting_payment','awaiting_delivery')"):
-                        pending=self.store.rows("SELECT payload FROM jobs WHERE kind='delivery' AND state IN ('queued','running')")
-                        if not any(json.loads(j['payload']).get('purchase_id')==purchase['id'] for j in pending):self.store.job('delivery',{'purchase_id':purchase['id']})
-                try:worked=self.process_one()
-                except Exception:worked=False
+                try:
+                    if not self.demo and time.time()-last_poll>300:
+                        for purchase in self.store.rows("SELECT id FROM purchases WHERE state IN ('awaiting_payment','awaiting_delivery')"):
+                            pending=self.store.rows("SELECT payload FROM jobs WHERE kind='delivery' AND state IN ('queued','running')")
+                            if not any(json.loads(j['payload']).get('purchase_id')==purchase['id'] for j in pending):self.store.job('delivery',{'purchase_id':purchase['id']})
+                        last_poll=time.time()
+                    worked=self.process_one()
+                except Exception as error:
+                    import logging
+                    logging.getLogger(__name__).warning('Worker iteration interrupted: %s',type(error).__name__)
+                    worked=False
                 if not worked:self.stop.wait(1)
         self.thread=threading.Thread(target=loop,name='virtualwan-worker',daemon=True);self.thread.start()

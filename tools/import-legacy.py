@@ -39,12 +39,12 @@ def main():
     matching=next((store.document('profiles',p['id']) for p in store.rows('SELECT id FROM profiles') if store.document('profiles',p['id'])['config']['vps'].get('primary_ip')==config['vps']['primary_ip']),None)
     profile=control.add_profile({'name':args.name,'provider':'ovh','capacity':16,'ready':True,'config':config},matching['id'] if matching else None)
     if args.secrets_json:
-        for name,value in json.loads(args.secrets_json.read_text()).items():store.secret_set(name,value)
+        for name,value in json.loads(args.secrets_json.read_text(encoding='utf-8-sig')).items():store.secret_set(name,value)
     if args.known_hosts:shutil.copyfile(args.known_hosts,store.root/'ssh-known-hosts');os.chmod(store.root/'ssh-known-hosts',0o600)
     imported=0
-    metadata=json.loads(args.deployments_json.read_text()) if args.deployments_json else {}
+    metadata=json.loads(args.deployments_json.read_text(encoding='utf-8-sig')) if args.deployments_json else {}
     if args.registry:
-        registry=json.loads(args.registry.read_text())
+        registry=json.loads(args.registry.read_text(encoding='utf-8-sig'))
         if args.segment!='legacy':registry=registry['segments'][args.segment]
         for client in registry['clients']:
             ip=client['public_ip']

@@ -11,6 +11,9 @@ from .. import domain
 from ..store import ident
 
 
+from ..text import decode_external_output as decode_pve_output
+
+
 class GraphicalPreparationError(domain.Conflict):
     """An actionable, customer-safe failure of a specific preparation phase."""
 
@@ -36,7 +39,7 @@ class ClientPVE:
     def command(self,args):
         timeout=150 if len(args)>2 and args[0]=='pvesh' and args[1] in ('create','set','delete') else 45
         _,out,err=self.ssh.exec_command(shlex.join(self.prefix+args),timeout=timeout)
-        raw=out.read(2*1024*1024).decode();errors=err.read(65536).decode()
+        raw=decode_pve_output(out.read(2*1024*1024));errors=decode_pve_output(err.read(65536))
         code=out.channel.recv_exit_status()
         if code:
             self.store.event(self.client.get('_operation_run',self.client.get('id') or ident()),'client.pve.command.failed',exit_code=code,stderr=errors)

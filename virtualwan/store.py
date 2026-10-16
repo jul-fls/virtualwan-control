@@ -3,6 +3,7 @@ from datetime import datetime,timezone
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote
 import re
 import sqlite3
 import threading
@@ -104,8 +105,8 @@ class Store:
         if isinstance(value,dict):return {k:('[REDACTED]' if re.search(r'password|passwd|secret|token|csrf|cookie|authorization|hashed_passwd',k,re.I) and not k.endswith('_env') else self.clean(v)) for k,v in value.items()}
         if isinstance(value,list):return [self.clean(x) for x in value]
         if isinstance(value,str):
-            for secret in set(self.redactions):
-                if secret:value=value.replace(secret,'[REDACTED]')
+            for secret in sorted(set(self.redactions),key=len,reverse=True):
+                if secret:value=value.replace(secret,'[REDACTED]').replace(quote(secret,safe=''),'[REDACTED]')
         return value
 
     def event(self,run_id,action,**data):

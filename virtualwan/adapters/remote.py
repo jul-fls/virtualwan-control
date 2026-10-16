@@ -10,6 +10,9 @@ import sys
 import tempfile
 import hashlib
 
+if 'decode_external_output' not in globals():
+    from virtualwan.text import decode_external_output
+
 if 'ipv6_settings' not in globals():
     from virtualwan.ipv6 import ipv6_settings,ipv6_address,ipv6_validate_address,ipv6_link_local,ipv6_network_data,ipv6_cloud_files
 
@@ -20,7 +23,8 @@ def audit(event, **data):
 
 def run(*args, input=None):
     audit('command.begin', argv=args)
-    p = subprocess.run(args, input=input, text=True, capture_output=True)
+    p = subprocess.run(args,input=input.encode('utf-8') if isinstance(input,str) else input,capture_output=True)
+    p.stdout=decode_external_output(p.stdout);p.stderr=decode_external_output(p.stderr)
     audit('command.end', argv=args, exit_code=p.returncode)
     if p.returncode:
         # Command output may contain a guest password; orchestrator scrubs it.
@@ -65,7 +69,7 @@ def router_bootstrap(q):
     if route.get('prefsrc')!=primary:raise ValueError('Primary source mismatch')
     if c.get('wan_interface') and c['wan_interface']!=route['dev']:raise ValueError('Configured WAN differs from actual route')
     c['wan_interface']=route['dev']
-    release=Path('/etc/os-release').read_text()
+    release=Path('/etc/os-release').read_text(encoding='utf-8-sig')
     if not re.search(r'^ID=\"?debian\"?$',release,re.M) or not re.search(r'^VERSION_ID=\"?13\"?$',release,re.M):
         raise ValueError('Automatic onboarding currently supports fresh Debian 13 only')
     target=Path('/etc/virtualwan');binary=Path('/usr/local/sbin/virtualwan')
@@ -111,7 +115,7 @@ def pve_ipv6_allocate(q):
     c=ipv6_settings(q['ipv6']);p=q['pve'];vmid=int(p['vmid'])
     with open('/run/virtualwan-isolation.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        r=json.loads(Path('/etc/pve/virtualwan-isolation.json').read_text())
+        r=json.loads(Path('/etc/pve/virtualwan-isolation.json').read_text(encoding='utf-8-sig'))
         segments=list(r.get('segments',{}).values())+([r] if 'clients' in r else [])
         segment=r['segments'][p['isolation_segment']] if p.get('isolation_segment') else r
         existing=next((v for v in segment['clients'] if v['vmid']==vmid),None)
@@ -134,7 +138,7 @@ def pve_ipv6_prepare(q):
         item=q['sources'][name];data=base64.b64decode(item['base64'],validate=True)
         if hashlib.sha256(data).hexdigest()!=item['sha256']:raise ValueError('Isolation source digest mismatch')
         compile(data,name,'exec');sources[name]=data
-    registry=json.loads(registry_path.read_text());segment=registry['segments'][p['isolation_segment']] if p.get('isolation_segment') else registry
+    registry=json.loads(registry_path.read_text(encoding='utf-8-sig'));segment=registry['segments'][p['isolation_segment']] if p.get('isolation_segment') else registry
     if segment['nodes'][p['node']]['bridge']!=p['bridge']:raise ValueError('IPv6 isolation bridge differs')
     previous=segment.get('ipv6')
     if previous:
@@ -150,7 +154,7 @@ def pve_ipv6_prepare(q):
     # One shared registry write. A failed node upgrade leaves a retryable stopped VM.
     with open('/run/virtualwan-isolation.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        if json.loads(registry_path.read_text())!=registry:raise ValueError('Isolation registry changed during IPv6 preparation')
+        if json.loads(registry_path.read_text(encoding='utf-8-sig'))!=registry:raise ValueError('Isolation registry changed during IPv6 preparation')
         temporary=registry_path.with_suffix('.ipv6.next');temporary.write_text(json.dumps(candidate,indent=2));os.replace(temporary,registry_path)
     script='''import json,sys,base64,pathlib,subprocess,hashlib
 q=json.load(sys.stdin);b=pathlib.Path('/var/lib/virtualwan/runs')/q['run_id'];b.mkdir(mode=0o700,parents=True,exist_ok=True)
@@ -187,14 +191,14 @@ def main():
     elif action == 'router_bootstrap':
         router_bootstrap(q)
     elif action == 'router_bootstrap_finalize':
-        c=json.loads(Path('/etc/virtualwan/virtualwan.json').read_text())
+        c=json.loads(Path('/etc/virtualwan/virtualwan.json').read_text(encoding='utf-8-sig'))
         route=json.loads(run('ip','-j','-4','route','get','1.1.1.1'))[0]
         if c['primary_ip']!=q['primary_ip'] or route.get('prefsrc')!=q['primary_ip'] or route.get('dev')!=c['wan_interface']:
             raise ValueError('Post-reconnect route verification failed; rollback timer remains armed')
         run('systemctl','stop','virtualwan-bootstrap-rollback.timer')
         emit({'reconnected':True,'primary_egress_verified':True})
     elif action == 'vps_inspect':
-        c = json.loads(Path(q['path']).read_text())
+        c = json.loads(Path(q['path']).read_text(encoding='utf-8-sig'))
         if c['primary_ip'] != q['primary_ip']:
             raise ValueError('VPS primary IP mismatch')
         emit({'config': c, 'route': run('ip', '-4', 'route', 'get', '1.1.1.1')})
@@ -228,7 +232,7 @@ def main():
         import fcntl,time
         client=q['client'];vmid=int(client['vmid'])
         if vmid==int(p['template']):raise ValueError('Template deletion forbidden')
-        registry_path=Path('/etc/pve/virtualwan-isolation.json');registry=json.loads(registry_path.read_text())
+        registry_path=Path('/etc/pve/virtualwan-isolation.json');registry=json.loads(registry_path.read_text(encoding='utf-8-sig'))
         reg=registry.get('segments',{}).get(p['isolation_segment']) if p.get('isolation_segment') else registry
         if not reg:raise ValueError('Unknown client segment')
         registered=next((v for v in reg['clients'] if int(v['vmid'])==vmid),None)
@@ -236,7 +240,7 @@ def main():
         resources=json.loads(run('pvesh','get','/cluster/resources','--type','vm','--output-format','json'))
         vm=next((v for v in resources if int(v['vmid'])==vmid),None)
         manifest=Path('/var/lib/virtualwan-retire')/(str(vmid)+'.json')
-        saved=json.loads(manifest.read_text()) if manifest.exists() else None
+        saved=json.loads(manifest.read_text(encoding='utf-8-sig')) if manifest.exists() else None
         detached=bool(saved and saved.get('detached') and matching(saved['client']))
         detach_pending=detached
         if not matching(registered) and (registered or vm) and not (not registered and detached):raise ValueError('Client registration ownership mismatch')
@@ -256,7 +260,10 @@ def main():
             actual=json.loads(run('pvesh','get',f'/nodes/{node}/qemu/{vmid}/status/current','--output-format','json'))
             vm['status']=actual['status']
         def task(method,path):
-            upid=run('pvesh',method,path,'--output-format','json').strip();upid=json.loads(upid)
+            raw=run('pvesh',method,path,'--output-format','json').strip()
+            try:upid=json.loads(raw)
+            except json.JSONDecodeError:upid=json.loads(raw.splitlines()[-1])
+            if not isinstance(upid,str) or not re.fullmatch(r'UPID:[A-Za-z0-9_.:@!+-]{10,250}',upid):raise ValueError('Invalid Proxmox task identifier')
             deadline=time.monotonic()+150
             while True:
                 status=json.loads(run('pvesh','get',f'/nodes/{node}/tasks/{upid}/status','--output-format','json'))
@@ -293,7 +300,7 @@ def main():
                     manifest.write_text(json.dumps({'client':client,'cicustom':conf.get('cicustom','')}));manifest.chmod(0o600)
                 task('delete',f'/nodes/{node}/qemu/{vmid}')
             if manifest.exists():
-                saved=json.loads(manifest.read_text())
+                saved=json.loads(manifest.read_text(encoding='utf-8-sig'))
                 if not matching(saved['client']):raise ValueError('Snippet recovery ownership differs')
                 refs=dict(part.split('=',1) for part in saved['cicustom'].split(',') if '=' in part)
                 directory=Path(p['snippet_directory']).resolve()
@@ -309,7 +316,7 @@ def main():
             if vm and not (detached and not conf.get('net0')):raise ValueError('VM still connected: keep isolation registration')
             with open('/run/virtualwan-isolation.lock','w') as lock:
                 fcntl.flock(lock,fcntl.LOCK_EX)
-                current=json.loads(registry_path.read_text());segment=current['segments'][p['isolation_segment']] if p.get('isolation_segment') else current
+                current=json.loads(registry_path.read_text(encoding='utf-8-sig'));segment=current['segments'][p['isolation_segment']] if p.get('isolation_segment') else current
                 existing=next((v for v in segment['clients'] if int(v['vmid'])==vmid),None)
                 if existing and not matching(existing):raise ValueError('Registration changed during deletion')
                 segment['clients']=[v for v in segment['clients'] if int(v['vmid'])!=vmid]
@@ -362,7 +369,7 @@ def main():
         emit({'config':c,'route':route,'backup':str(backup),'router_updated':source is not None})
     elif action == 'pve_inventory':
         assert run('hostname','-s').strip()==p['node']
-        registry=json.loads(Path('/etc/pve/virtualwan-isolation.json').read_text())
+        registry=json.loads(Path('/etc/pve/virtualwan-isolation.json').read_text(encoding='utf-8-sig'))
         reg=registry.get('segments',{}).get(p['isolation_segment']) if p.get('isolation_segment') else registry
         if not reg:raise ValueError('Unknown segment')
         resources={v['vmid']:v for v in json.loads(run('pvesh','get','/cluster/resources','--type','vm','--output-format','json'))}
@@ -390,7 +397,7 @@ def main():
         isolation=None
         registry=Path('/etc/pve/virtualwan-isolation.json')
         if registry.exists():
-            reg=json.loads(registry.read_text());nodes={}
+            reg=json.loads(registry.read_text(encoding='utf-8-sig'));nodes={}
             if p.get('isolation_segment'):
                 reg=reg.get('segments',{}).get(p['isolation_segment'])
                 if not reg:raise ValueError('Isolation segment not bootstrapped')
@@ -416,7 +423,7 @@ def main():
             expected_refs = ','.join(f'{s}={p["snippet_storage"]}:snippets/virtualwan-{vmid}-{s}.yaml' for s in ('network', 'user'))
             if cfg.get('cicustom') != expected_refs or f'bridge={p["bridge"]}' not in cfg['net0'] or int(cfg['memory']) != p['memory_mb'] or int(cfg['cores']) != p['cores']:
                 raise ValueError('Existing VM is incomplete or drifted: inspect before resuming')
-            network = json.loads((Path(p['snippet_directory']) / f'virtualwan-{vmid}-network.yaml').read_text())
+            network = json.loads((Path(p['snippet_directory']) / f'virtualwan-{vmid}-network.yaml').read_text(encoding='utf-8-sig'))
             if network['config'][0]['mac_address'] != mac.lower() or network['config'][0]['subnets'][0]['address'] != q['ip'] + '/32':
                 raise ValueError('Existing VM network snippet conflicts')
             if q.get('ipv6') and network!=ipv6_network_data(q['guest'],q['ip'],mac,q['ipv6']):raise ValueError('Existing dual-stack snippet differs')
