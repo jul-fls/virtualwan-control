@@ -3,10 +3,17 @@ import ipaddress,re
 
 def os_network_data(guest,ipv4,mac,config=None):
     data=ipv6_network_data(guest,ipv4,mac,config)
-    if guest.get('os_family','debian')!='debian':
-        # A host route makes the off-subnet gateway explicit for all renderers.
-        data['config'][0]['subnets'][0].pop('pointopoint',None)
-        data['config'][0]['subnets'][0]['routes']=[{'destination':guest['gateway']+'/32','gateway':'0.0.0.0'}]
+    # v1 static6 rejects these keys; sysctl files disable RA/autoconfiguration.
+    for subnet in data['config'][0]['subnets']:
+        if subnet['type']=='static6':
+            subnet.pop('accept-ra',None);subnet.pop('autoconf',None)
+    subnet=data['config'][0]['subnets'][0]
+    subnet.pop('pointopoint',None)
+    subnet['routes']=[{'destination':guest['gateway']+'/32','gateway':'0.0.0.0'}]
+    if guest.get('os_family','debian')=='debian':
+        # ifupdown must install the link route before the default route.
+        subnet.pop('gateway',None)
+        subnet['routes'].append({'destination':'0.0.0.0/0','gateway':guest['gateway']})
     return data
 
 def os_user_data(guest,fqdn,ipv4,mac,access,hashed_password='',config=None):
@@ -33,13 +40,14 @@ def os_user_data(guest,fqdn,ipv4,mac,access,hashed_password='',config=None):
         data['write_files']=[{'path':'/etc/default/grub.d/99-virtualwan-console.cfg','permissions':'0644','content':'GRUB_TERMINAL=console\nGRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} console=tty0"\n'},{'path':'/etc/default/keyboard','permissions':'0644','content':'XKBMODEL="pc105"\nXKBLAYOUT="fr"\nXKBVARIANT=""\nXKBOPTIONS=""\n'}]
         data['runcmd']=([['localectl','set-keymap','fr']] if rpm else [['setupcon','--force']])+[['sh','-c','command -v update-grub >/dev/null && update-grub || true'],['systemctl','enable','--now','getty@tty1.service'],['systemctl','enable','--now','qemu-guest-agent']]
         if rpm:data['runcmd'].append(['sh','-c','command -v grubby >/dev/null && grubby --update-kernel=ALL --remove-args=console --args=console=tty0 || true'])
-        if family!='debian':
+        if family!='freebsd':
             data['bootcmd']=[['ip','route','replace',str(ipaddress.IPv4Address(guest['gateway']))+'/32','dev',interface],['ip','route','replace','default','via',guest['gateway'],'dev',interface,'src',ipv4]]
         if config:data['write_files']+=ipv6_cloud_files(interface)
     return data
 
 def freebsd_probe_code(dual=False):
-    return '''import json,subprocess,re,ipaddress
+    return '''import json,subprocess,re,ipaddress,os
+os.environ['PATH']='/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin'
 r=lambda *a:subprocess.check_output(a,text=True)
 v4=[];v6=[];dev=None
 for line in r('ifconfig','-a').splitlines():
