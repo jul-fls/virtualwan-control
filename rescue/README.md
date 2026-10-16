@@ -61,7 +61,7 @@ verify its SHA-256 and visibility from all eligible nodes. The image is shared;
 no per-customer rebuild is needed. Configure the controller:
 
 ```dotenv
-VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v2.iso
+VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v3.iso
 ```
 
 Recreate the management container after changing its environment. In the portal,
@@ -83,7 +83,7 @@ and the VM's [NoCloud media](https://docs.cloud-init.io/en/latest/reference/data
 
 ## Per-activation credentials
 
-The v2 ISO contains `/virtualwan-rescue.json` (`credential_protocol: 1`).
+The v2 and later ISOs contain `/virtualwan-rescue.json` (`credential_protocol: 1`).
 The portal refuses older images for password-enabled activation. `isoinfo`,
 `genisoimage` and `openssl` must be installed on the PVE connection node.
 While the VM is stopped, the common live ISO goes on `ide0`, a small individual
@@ -118,3 +118,14 @@ may replace only media whose shared ISO, VMID, MAC, IP and session are verified.
 It creates a fresh password/media, preserves the normal disk boot order derived
 from the existing disks, verifies rescue boot, then removes the obsolete
 credential CD. Unknown or customer-owned devices are refused.
+
+## Rescue hostname
+
+The v3 image reads the declarative `fqdn` (or `hostname`) from the existing
+NoCloud user-data and adds `-rescue` to the first DNS label. For example,
+`vps-141951093.hosting.flusin.fr` becomes
+`vps-141951093-rescue.hosting.flusin.fr`. This sets the live kernel hostname,
+`/etc/hostname` and its local `/etc/hosts` entry before console/SSH login.
+No public DNS record or reverse DNS is changed. The installed system is untouched.
+Unknown seeds without a hostname retain the generic rescue name. DNS labels
+and lengths are validated; NoCloud commands are never executed.

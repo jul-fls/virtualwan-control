@@ -89,7 +89,7 @@ vrai. Les listes DNS/préfixes utilisent des virgules, les booléens true/false.
   valable 60 s, puis canal SSH épinglé jusqu’au socket VNC de la bonne VM. Aucune
   IP/clé de management n’est fournie au client. Une session est limitée à une
   heure et vérifiée toutes les 10 s contre révocation/changement d’affectation.
-- **Rescue** : configurer `VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v2.iso` avec une ISO
+- **Rescue** : configurer `VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v3.iso` avec une ISO
   existante disponible sur tous les nœuds concernés. Le basculement arrête automatiquement le VPS, vérifie les médias et l’ordre de démarrage, enregistre les identifiants puis le redémarre. Le retour au disque suit le même cycle.
   Les lecteurs `ide0` et `ide1` doivent être libres ou contenir les seuls médias rescue vérifiés de cette VM ; le disque cloud-init existant reste intact.
 - **Personnalisation** : nom d’affichage/description propres au client ; le nom
@@ -186,3 +186,5 @@ le client reçoit une référence, sans adresse de management.
 Un ISO Debian Live commun et sa configuration réseau automatique sont fournis
 dans [rescue/README.md](../rescue/README.md). Il reprend le média NoCloud de
 chaque VM ; le compte `rescue` accepte sa clé SSH habituelle et un mot de passe propre à chaque activation. Ce mot de passe comporte 12 caractères alphanumériques sans caractères ambigus. Il reste consultable via « Voir les identifiants rescue » tant que ce mode est actif, est chiffré dans la base et supprimé au retour au disque système. Un badge jaune Rescue identifie ce mode dans la liste et la fiche VPS.
+
+Le live rescue reprend le FQDN technique avec `-rescue` ajouté au premier label : `vps-141951093-rescue.hosting.flusin.fr`. Ce nom est local au live ; le hostname du disque système, le DNS et le reverse ne changent pas. Cette fonction utilise l’ISO commune v3.

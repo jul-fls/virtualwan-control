@@ -47,6 +47,20 @@ def authorized_keys(user):
             if isinstance(key,str) and len(key)<=16384 and re.fullmatch(r'(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/]+={0,3}(?: [^\r\n]*)?',key) and key not in keys:keys.append(key)
     return keys[:100]
 
+def rescue_hostname(user):
+    if not isinstance(user,dict):return None
+    value=user.get('fqdn') or user.get('hostname')
+    if not value:return None
+    if not isinstance(value,str):raise ValueError('Invalid guest hostname')
+    value=value.lower().rstrip('.')
+    labels=value.split('.')
+    if len(value)>253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label) for label in labels):raise ValueError('Invalid guest hostname')
+    labels[0]+='-rescue'
+    result='.'.join(labels)
+    if len(labels[0])>63 or len(result)>253:raise ValueError('Rescue hostname exceeds DNS limits')
+    return result
+
+
 def document(path):
     import yaml
     with path.open('rb') as stream:data=stream.read(1024*1024+1)
@@ -68,6 +82,14 @@ def main():
     finally:run('umount',str(medium))
     interfaces={p.read_text().strip().lower():p.parent.name for p in Path('/sys/class/net').glob('*/address') if p.parent.name!='lo'}
     settings=plan(network,interfaces);nic=settings['interface']
+    hostname=rescue_hostname(user)
+    if hostname:
+        run('hostname',hostname)
+        Path('/etc/hostname').write_text(hostname+'\n')
+        hosts=Path('/etc/hosts')
+        lines=[line for line in hosts.read_text().splitlines() if not re.match(r'^\s*127\.0\.1\.1(?:\s|$)',line)]
+        hosts.write_text('\n'.join(lines)+'\n127.0.1.1 '+hostname+' '+hostname.split('.')[0]+'\n')
+        settings['hostname']=hostname
     for key in ('accept_ra','autoconf','use_tempaddr'):
         Path('/proc/sys/net/ipv6/conf',nic,key).write_text('0')
     run('ip','link','set','dev',nic,'mtu',str(settings['mtu']),'up')

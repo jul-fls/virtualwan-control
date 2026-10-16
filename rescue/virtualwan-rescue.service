@@ -2,7 +2,7 @@
 Description=Virtualwan rescue per-VM network from read-only cloud-init media
 After=virtualwan-rescue-auth.service live-config.service systemd-udev-settle.service
 Wants=systemd-udev-settle.service virtualwan-rescue-auth.service
-Before=ssh.service
+Before=ssh.service getty@tty1.service serial-getty@ttyS0.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/virtualwan-rescue-network

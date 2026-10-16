@@ -3,7 +3,7 @@
 import base64,json,os,secrets,shutil,socket,subprocess,tempfile,time
 from pathlib import Path
 
-ISO=Path('/output/virtualwan-rescue-debian13-amd64-v2.iso')
+ISO=Path('/output/virtualwan-rescue-debian13-amd64-v3.iso')
 
 def qga(path,request):
     with socket.socket(socket.AF_UNIX) as s:
@@ -35,7 +35,7 @@ def boot(mode):
         (seed/'network-config').write_text(json.dumps(network));(seed/'meta-data').write_text('instance-id: synthetic-rescue-test\n')
         subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(root/'ssh-key')],check=True)
         public_key=(root/'ssh-key.pub').read_text().strip()
-        (seed/'user-data').write_text('#cloud-config\n'+json.dumps({'users':[{'name':'debian','ssh_authorized_keys':[public_key]}],'runcmd':['touch /NO_CLOUD_USERDATA_MUST_NOT_EXECUTE']}))
+        (seed/'user-data').write_text('#cloud-config\n'+json.dumps({'fqdn':'vps-1985110023.hosting.example.net','users':[{'name':'debian','ssh_authorized_keys':[public_key]}],'runcmd':['touch /NO_CLOUD_USERDATA_MUST_NOT_EXECUTE']}))
         subprocess.run(['xorriso','-as','mkisofs','-quiet','-V','cidata','-J','-r','-o',str(root/'seed.iso'),str(seed)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         subprocess.run(['qemu-img','create','-q','-f','qcow2',str(root/'blank.qcow2'),'64M'],check=True)
         auth=root/'auth';auth.mkdir();password=''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789') for _ in range(12))
@@ -66,7 +66,7 @@ import time
 for _ in range(30):
  if not any(a.get('tentative') for n in json.loads(r('ip','-j','addr').stdout) for a in n['addr_info']):break
  time.sleep(0.2)
-print(json.dumps({'addresses':json.loads(r('ip','-j','addr').stdout),'routes4':json.loads(r('ip','-j','-4','route').stdout),'routes6':json.loads(r('ip','-j','-6','route').stdout),'network':json.loads(pathlib.Path('/run/virtualwan-rescue-network.json').read_text()) if pathlib.Path('/run/virtualwan-rescue-network.json').exists() else None,'disk_mounted':r('findmnt','-n','-S','/dev/vda').returncode==0,'userdata_executed':pathlib.Path('/NO_CLOUD_USERDATA_MUST_NOT_EXECUTE').exists(),'busybox':r('busybox','true').returncode==0,'rescue_user':r('id','rescue').returncode==0,'gateway4':r('ping','-c','1','-W','2','10.0.2.2').returncode==0,'gateway6':r('ping','-6','-c','1','-W','2','fe80::2%'+(json.loads(pathlib.Path('/run/virtualwan-rescue-network.json').read_text()).get('interface','eth0') if pathlib.Path('/run/virtualwan-rescue-network.json').exists() else 'eth0')).returncode==0,'ssh_config':r('sshd','-T').stdout}))
+print(json.dumps({'addresses':json.loads(r('ip','-j','addr').stdout),'routes4':json.loads(r('ip','-j','-4','route').stdout),'routes6':json.loads(r('ip','-j','-6','route').stdout),'network':json.loads(pathlib.Path('/run/virtualwan-rescue-network.json').read_text()) if pathlib.Path('/run/virtualwan-rescue-network.json').exists() else None,'disk_mounted':r('findmnt','-n','-S','/dev/vda').returncode==0,'userdata_executed':pathlib.Path('/NO_CLOUD_USERDATA_MUST_NOT_EXECUTE').exists(),'hostname':r('hostname').stdout.strip(),'fqdn':r('hostname','-f').stdout.strip(),'busybox':r('busybox','true').returncode==0,'rescue_user':r('id','rescue').returncode==0,'gateway4':r('ping','-c','1','-W','2','10.0.2.2').returncode==0,'gateway6':r('ping','-6','-c','1','-W','2','fe80::2%'+(json.loads(pathlib.Path('/run/virtualwan-rescue-network.json').read_text()).get('interface','eth0') if pathlib.Path('/run/virtualwan-rescue-network.json').exists() else 'eth0')).returncode==0,'ssh_config':r('sshd','-T').stdout}))
 """
                 result=guest(qsocket,code)
                 assert result['busybox'] and result['rescue_user'] and not result['disk_mounted'] and not result['userdata_executed'],result
@@ -75,6 +75,7 @@ print(json.dumps({'addresses':json.loads(r('ip','-j','addr').stdout),'routes4':j
                     assert result['network'] is None
                     assert not any(a['family']=='inet' for nic in result['addresses'] if nic['ifname']!='lo' for a in nic['addr_info'])
                 else:
+                    assert result['hostname']==result['fqdn']=='vps-1985110023-rescue.hosting.example.net'
                     assert result['network']['ipv4']=='198.51.100.23/32' and result['network']['ipv6']=='2001:db8:23::23/128'
                     assert result['network']['interface']!='ens18'
                     assert any(r.get('dst')=='default' and r.get('gateway')=='10.0.2.2' for r in result['routes4'])

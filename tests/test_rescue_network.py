@@ -17,6 +17,13 @@ class RescueNetwork(unittest.TestCase):
         key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA synthetic'
         user={'runcmd':['touch /should-never-exist'],'users':[{'name':'root','sudo':['ALL=(ALL) ALL'],'ssh_authorized_keys':[key,'command="danger" '+key,key+'\nextra']}]}
         self.assertEqual(module.authorized_keys(user),[key])
+    def test_rescue_hostname_keeps_domain_and_validates_dns_labels(self):
+        self.assertEqual(module.rescue_hostname({'fqdn':'vps-141951093.hosting.flusin.fr'}),'vps-141951093-rescue.hosting.flusin.fr')
+        self.assertEqual(module.rescue_hostname({'hostname':'Other.EXAMPLE.NET.'}),'other-rescue.example.net')
+        self.assertEqual(module.rescue_hostname({'hostname':'vps-1'}),'vps-1-rescue')
+        self.assertIsNone(module.rescue_hostname({}))
+        for value in ('bad;reboot.example','x\ny.example','-bad.example','a..example','x'*57+'.example',123):
+            with self.assertRaises(ValueError):module.rescue_hostname({'fqdn':value})
     def test_invalid_routes_or_dns_never_reach_commands(self):
         data=self.network();data['config'][0]['subnets'][1]['gateway']='2001:db8::1'
         with self.assertRaises(ValueError):module.plan(data,{'52:54:00:12:34:56':'eth0'})

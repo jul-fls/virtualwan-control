@@ -24,6 +24,6 @@ cp /source/0100-rescue.hook.chroot /source/0900-autoboot.hook.binary config/hook
 chmod 755 config/hooks/live/*
 lb build
 mkdir -p /output
-cp virtualwan-rescue-amd64.hybrid.iso /output/virtualwan-rescue-debian13-amd64-v2.iso
+cp virtualwan-rescue-amd64.hybrid.iso /output/virtualwan-rescue-debian13-amd64-v3.iso
 cp virtualwan-rescue-amd64.packages /output/packages.txt
-(cd /output && sha256sum virtualwan-rescue-debian13-amd64-v2.iso > virtualwan-rescue-debian13-amd64-v2.iso.sha256)
+(cd /output && sha256sum virtualwan-rescue-debian13-amd64-v3.iso > virtualwan-rescue-debian13-amd64-v3.iso.sha256)

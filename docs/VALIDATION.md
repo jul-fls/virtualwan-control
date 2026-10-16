@@ -513,3 +513,27 @@ the configured graceful timeout/force-stop path. Rescue boot read back as
 `order=ide0;scsi0`; normal return read back as `order=scsi0`, with both rescue
 CDs absent and the credential ISO deleted. The VM, its temporary disk and its
 credential media were removed after the test. Customer VMs were not stopped.
+
+## Per-VM rescue hostname — 2026-10-16
+
+The common v3 live reads the declarative FQDN from the existing NoCloud user-data
+and appends `-rescue` to the first label, preserving the domain. It sets the
+kernel hostname and the live-only `/etc/hostname`/`/etc/hosts` before console
+and SSH login. It does not execute cloud-init commands or modify the installed
+system, public DNS or PTR records. Missing hostnames retain the generic name.
+
+Six targeted rescue tests passed, including invalid/oversized hostname handling.
+Both BIOS and UEFI boots verified identical `hostname` and `hostname -f` values of
+`vps-1985110023-rescue.hosting.example.net`, together with the existing public
+IPv4/IPv6 routing and SSH key/password tests.
+
+ISO v3 SHA-256:
+`fc36f81aeae24a7169ccf5eec4a67079fb8cf31188f77f45fbfccfe7f776e09d`.
+Select `VWAN_RESCUE_ISO=iso:iso/virtualwan-rescue-debian13-amd64-v3.iso` and
+recreate the controller to use it for subsequent rescue activations. The common
+image retains credential protocol 1 and needs no per-client image rebuild.
+
+The v3 no-NoCloud boot also passed (generic hostname, networking unconfigured).
+The ISO was added to the existing shared PVE storage, its SHA-256 verified
+remotely and its volume ID confirmed visible on pve2 and pve3. No customer VM
+was rebooted or modified. The isolated validation container was removed.
