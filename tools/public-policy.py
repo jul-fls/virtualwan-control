@@ -49,7 +49,8 @@ def rules6(c,v,ports):
     protected='{ '+', '.join(cfg['protected_networks'])+' }'
     public='{ '+', '.join(x['public_ipv6'] for x in c['clients'] if x.get('public_ipv6'))+' }'
     # Replies to admin connections from the home public prefix remain possible.
-    add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr 2000::/3 ct direction reply ct state {{ established, related }}')
+    # The inet guard below checks reply state without enabling native bridge CT.
+    add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr 2000::/3')
     add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr {public}')
     add(f'{out} ether type ip6 ip6 daddr {protected}','drop')
     add(f'{out} ether daddr {gm} ether type ip6 ip6 saddr {p} ip6 daddr 2000::/3')
@@ -59,6 +60,47 @@ def rules6(c,v,ports):
 
 
 TABLE = 'virtualwan_isolation'
+
+
+def zones(v):
+    """Stable, disjoint public-bridge/fwbr zones; collisions fail validation."""
+    base=v.get('conntrack_zone',32768+2*(v['vmid']%16384))
+    if type(base) is not int or not 2 <= base <= 65534 or base%2:
+        raise ValueError('conntrack_zone must be an even integer from 2 to 65534')
+    return base,base+1
+
+
+def inet_policy(c):
+    """Use only IP conntrack, with a separate context for every bridge leg."""
+    table=c.get('table_name',TABLE);b=c['bridge'];gm=c['gateway_mac'].lower()
+    lines=[f'add table inet {table}',f'delete table inet {table}',f'table inet {table} {{',
+           ' chain zones { type filter hook prerouting priority -310; policy accept;']
+    for v in c['clients']:
+        main,fw=zones(v);m=v['mac'].lower()
+        lines.append(f'  iifname "fwbr{v["vmid"]}i0" counter ct zone set {fw}')
+        for family,key in [('ip','public_ip'),('ip6','public_ipv6')]:
+            if not v.get(key):continue
+            p=v[key]
+            lines.append(f'  iifname "{b}" ether saddr {m} ether daddr {gm} {family} saddr {p} counter ct zone set {main}')
+            lines.append(f'  iifname "{b}" ether saddr {gm} ether daddr {m} {family} daddr {p} counter ct zone set {main}')
+    lines+=[' }',' chain administration { type filter hook forward priority -10; policy accept;']
+    admins=c.get('administration_public_networks',[])
+    public6=[v['public_ipv6'] for v in c['clients'] if v.get('public_ipv6')]
+    for v in c['clients']:
+        interfaces='{ '+', '.join(json.dumps(x) for x in (b,f'fwbr{v["vmid"]}i0'))+' }'
+        out=f'iifname {interfaces} ether saddr {v["mac"].lower()} ether daddr {gm}'
+        if admins:
+            expr=f'{out} ip saddr {v["public_ip"]} ip daddr {{ {", ".join(admins)} }}'
+            lines.append(f'  {expr} ct direction reply ct state {{ established, related }} counter accept')
+            lines.append(f'  {expr} counter drop')
+        if v.get('public_ipv6'):
+            expr=f'{out} ip6 saddr {v["public_ipv6"]}'
+            lines.append(f'  {expr} ip6 daddr {{ {", ".join(public6)} }} counter accept')
+            expr+=f' ip6 daddr {{ {", ".join(c["ipv6"]["protected_networks"])} }} ip6 daddr 2000::/3'
+            lines.append(f'  {expr} ct direction reply ct state {{ established, related }} counter accept')
+            lines.append(f'  {expr} counter drop')
+    lines+=[' }','}']
+    return '\n'.join(lines)+'\n'
 
 
 def validate(c):
@@ -83,10 +125,13 @@ def validate(c):
             raise ValueError('Administration exceptions must contain public Internet sources only')
         if not any(subnet.subnet_of(n) for n in protected):
             raise ValueError('Administration exception must be a protected public endpoint')
-    identities={c['gateway_mac'].lower(),c['gateway_ip']}
+    identities={c['gateway_mac'].lower(),c['gateway_ip']};used_zones=set()
     for v in c['clients']:
         if not isinstance(v['vmid'],int) or not 100 <= v['vmid'] <= 99999999:
             raise ValueError('Invalid VMID')
+        pair=zones(v)
+        if used_zones.intersection(pair):raise ValueError('Conntrack zone collision; assign distinct even conntrack_zone values')
+        used_zones.update(pair)
         if not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}',v['mac'].lower()) or int(v['mac'][:2],16)&1:
             raise ValueError('Invalid MAC')
         if not ipaddress.IPv4Address(v['public_ip']).is_global:
@@ -141,7 +186,7 @@ def generate(c):
         outgoing=f'iifname {ports} oifname "{u}" ether saddr {m} ether daddr {gm}'
         incoming=f'iifname "{u}" oifname {ports} ether saddr {gm} ether daddr {m}'
         if admins:
-            rule(f'{outgoing} ether type ip ip saddr {p} ip daddr @administration_v4 ct direction reply ct state {{ established, related }}')
+            rule(f'{outgoing} ether type ip ip saddr {p} ip daddr @administration_v4')
         rule(f'{outgoing} ether type ip ip daddr @protected_v4','drop')
         rule(f'{outgoing} ether type ip ip saddr {p}')
         rule(f'{incoming} ether type ip ip daddr {p} ip protocol icmp icmp type {{ destination-unreachable, time-exceeded, parameter-problem }} ip saddr {g}')
@@ -161,7 +206,7 @@ def generate(c):
         rule(f'{ain} ether daddr {m} {arp} arp saddr ether {gm} arp operation reply arp saddr ip {g} arp daddr ip {p} arp daddr ether {m}')
         rule(f'{ain} ether daddr {broadcast} {arp} arp saddr ether {gm} arp operation reply arp saddr ip {g} arp daddr ip {g}')
     rule('','drop');lines+=[' }','}']
-    return '\n'.join(lines)+'\n'
+    return '\n'.join(lines)+'\n'+inet_policy(c)
 
 
 if __name__=='__main__':

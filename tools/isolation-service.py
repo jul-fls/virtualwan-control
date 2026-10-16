@@ -29,7 +29,7 @@ def segments(registry):
         if 'legacy' in result:raise ValueError('Reserved segment name')
         result['legacy']={k:v for k,v in registry.items() if k!='segments'}
     if not result:raise ValueError('No configured segment')
-    vmids=set();public=set();macs=set();bridges=set();ipv6=set()
+    vmids=set();public=set();macs=set();bridges=set();ipv6=set();zones=set()
     for name,config in result.items():
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}',name):raise ValueError('Invalid segment name')
         for node,params in config['nodes'].items():
@@ -37,6 +37,9 @@ def segments(registry):
             if pair in bridges:raise ValueError('A bridge cannot belong to two segments')
             bridges.add(pair);module().validate({**config,**params,'table_name':table_name(name)})
         for v in config['clients']:
+            pair=module().zones(v)
+            if zones.intersection(pair):raise ValueError('Conntrack zone collision across segments')
+            zones.update(pair)
             for value,bucket in ((v['vmid'],vmids),(v['public_ip'],public),(v['mac'].lower(),macs)):
                 if value in bucket:raise ValueError('Duplicate VM/MAC/public identity across segments')
                 bucket.add(value)
@@ -49,14 +52,21 @@ def apply(force=False):
     registry=json.loads(REGISTRY.read_text(encoding='utf-8-sig'));all_segments=segments(registry);node=run('hostname','-s').strip()
     configurations=[{**c,**c['nodes'][node],'table_name':table_name(name)} for name,c in all_segments.items() if node in c['nodes']]
     if not configurations:raise ValueError('Node not registered')
+    # The bridge policy delegates stateful exceptions to IP hooks. Fail closed
+    # if br_netfilter is unavailable/disabled rather than bypassing that guard.
+    run('modprobe','br_netfilter')
+    for family in ('iptables','ip6tables'):
+        if run('sysctl','-n','net.bridge.bridge-nf-call-'+family).strip()!='1':
+            raise ValueError('Virtualwan requires bridge-nf-call-'+family+'=1; refusing an unguarded policy')
     tables=[c['table_name'] for c in configurations];data=''.join(module().generate(c) for c in configurations)
     STATE.mkdir(exist_ok=True);digest=hashlib.sha256(data.encode()).hexdigest()
     previous=(STATE/'digest').read_text(encoding='utf-8-sig') if (STATE/'digest').exists() else None
-    if not force and digest==previous and all(subprocess.run(['nft','list','table','bridge',t],capture_output=True).returncode==0 for t in tables):return
+    if not force and digest==previous and all(subprocess.run(['nft','list','table',family,t],capture_output=True).returncode==0 for t in tables for family in ('bridge','inet')):return
     old=json.loads((STATE/'tables.json').read_text(encoding='utf-8-sig')) if (STATE/'tables.json').exists() else []
     for t in set(old)-set(tables):
         if not re.fullmatch(r'virtualwan_isolation(?:_[a-f0-9]{12})?',t):raise ValueError('Invalid owned table')
-        if subprocess.run(['nft','list','table','bridge',t],capture_output=True).returncode==0:data+='delete table bridge '+t+'\n'
+        for family in ('bridge','inet'):
+            if subprocess.run(['nft','list','table',family,t],capture_output=True).returncode==0:data+='delete table '+family+' '+t+'\n'
     candidate=STATE/'candidate.nft';candidate.write_text(data);run('nft','-c','-f',str(candidate));run('nft','-f',str(candidate))
     (STATE/'digest').write_text(digest);(STATE/'tables.json').write_text(json.dumps(tables))
     print('Isolation loaded:',digest)
@@ -94,7 +104,7 @@ def main():
     parser.add_argument('--force',action='store_true');parser.add_argument('--segment',default='legacy')
     parser.add_argument('--vmid',type=int);parser.add_argument('--mac');parser.add_argument('--public-ip');parser.add_argument('--next-hop');parser.add_argument('--public-ipv6');parser.add_argument('--link-local-ipv6')
     args=parser.parse_args()
-    if args.action=='capabilities':print(json.dumps({'multi_segment':True,'legacy_registry':True,'ipv6':True}));return
+    if args.action=='capabilities':print(json.dumps({'multi_segment':True,'legacy_registry':True,'ipv6':True,'separate_conntrack_zones':True,'inet_administration_guard':True}));return
     with open('/run/virtualwan-isolation.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         if args.action=='apply':apply(args.force)
@@ -103,6 +113,7 @@ def main():
         else:
             apply();node=run('hostname','-s').strip()
             for name,c in segments(json.loads(REGISTRY.read_text(encoding='utf-8-sig'))).items():
-                if node in c['nodes']:print(run('nft','list','table','bridge',table_name(name)))
+                if node in c['nodes']:
+                    for family in ('bridge','inet'):print(run('nft','list','table',family,table_name(name)))
 
 if __name__=='__main__':main()
