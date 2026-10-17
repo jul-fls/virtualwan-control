@@ -22,7 +22,11 @@ python3 prepare-os-template.py --family ubuntu \
   --vmid VMID_LIBRE --storage STOCKAGE_DISQUES --bridge BRIDGE_PUBLIC
 ```
 
-Le script nécessite `virt-customize` (paquet libguestfs-tools ou équivalent) pour les images Linux. Il installe cloud-init, QGA, curl, Python 3, sudo et les outils clavier dans une copie temporaire ; nettoie l'identité machine/SSH et les fallbacks DHCP ; puis importe le disque et crée un template SeaBIOS avec scsi0, NoCloud ide2, VGA AZERTY et un lecteur scsi1 vide. Pour FreeBSD, fournir une image **déjà préparée** et ajouter `--prepared-freebsd` ; aucun chroot Linux n'est exécuté dans FreeBSD.
+Pour Debian et Ubuntu, le script nécessite `virt-customize` (libguestfs-tools) et prépare une copie temporaire avec cloud-init, QGA, curl, Python 3, sudo et les outils clavier. Pour Fedora, AlmaLinux et Rocky, préparer ces paquets dans une VM démarrée nativement, puis fournir son disque nettoyé avec `--prepared-rpm` : modifier les politiques SELinux hors ligne peut endommager leurs labels. Si les filtres QGA de l'éditeur bloquent guest-exec et guest-exec-status, autoriser uniquement ces deux appels supplémentaires en conservant les autres restrictions. Si nécessaire, rendre uniquement le domaine virt_qemu_ga_t permissif avec semanage ; SELinux reste Enforcing ailleurs. Cela autorise l'administrateur PVE à exécuter des commandes dans l'invité.
+
+Pour FreeBSD, fournir une image déjà préparée avec `--prepared-freebsd`, cloud-init Python/NoCloud (désactiver nuageinit), Python 3, curl et QGA. Vérifier les services persistants dans rc.conf.d, le PATH incluant /usr/local/bin et les permissions 0755 de /home. Le démarrage QGA doit tolérer un agent déjà actif. Vérifier le nom réel de l'interface : ens18 est courant sur Debian/Ubuntu/Fedora, eth0 sur AlmaLinux/Rocky et vtnet0 sur FreeBSD.
+
+Avant capture d'une image préparée, retirer les comptes et clés de test, nettoyer l'état cloud-init et l'identité machine, synchroniser les disques puis arrêter proprement la VM. Vérifier séparément le checksum de l'image officielle et celui du disque préparé. Le script importe ensuite le disque et crée un template avec scsi0, NoCloud ide2, VGA AZERTY et scsi1 vide.
 
 Le disque virtuel du template doit tenir dans la plus petite gamme proposée. Pas de disque client sur scsi1 : ce slot est réservé au CD. Le template doit permettre une connexion console VGA, démarrer cloud-init et QGA, et contenir Python 3 et curl dès le premier démarrage. Sur FreeBSD, vérifier `/usr/local/bin/python3` et le service qemu-guest-agent. Le script ne démarre pas le template sur le VLAN public et ne le publie pas automatiquement.
 
@@ -63,7 +67,7 @@ Utiliser un stockage ISO partagé entre nœuds pour les VM migrables. Le répert
 ## Vérifications réalisées pendant le développement
 
 - Tests API client/admin : appartenance, CSRF, blocage de gestion, quota, un seul emplacement, offsets, reprise, ISO invalide, choix d'OS et conservation d'identité.
-- Génération cloud-init pour les sept familles et sonde réseau FreeBSD.
+- Génération cloud-init pour les six familles et sonde réseau FreeBSD.
 - Suite Python complète et syntaxe JavaScript ; écrans catalogue/création/réinstallation vérifiés en démonstration locale.
 - Test réel scsi1 sur deux VM existantes : transfert SHA256 d'un ISO de contrôle, insertion/éjection, ordre de boot conservé et PID inchangé ; ISO de test supprimé ensuite. Lecteur vide aussi préparé dans le template Debian existant.
-- Les autres images OS n'ont pas été téléchargées, démarrées ni publiées sur l'infrastructure de production. Préparer et valider leurs templates avant publication.
+- Les contrôles de génération ne remplacent pas les essais réels de chaque image sur les nœuds cibles avant publication.

@@ -88,7 +88,7 @@ class FakeSFTP:
 class FreshDisk(unittest.TestCase):
     def setup_pve(self):
         cfg={'digest':'x','scsi0':'raid1-ssd:vm-120-disk-0,size=32G','ide2':'raid1-ssd:vm-120-cloudinit,media=cdrom','net0':'virtio=02:00:00:00:00:01,bridge=vmbr12,firewall=1,link_down=1','boot':'order=scsi0','cores':2,'memory':2048,'keyboard':'fr','onboot':1,'cicustom':'user=iso:snippets/virtualwan-120-user.yaml,network=iso:snippets/virtualwan-120-network.yaml'}
-        profile={'config':{'pve':{'disk_storage':'raid1-ssd','snippet_storage':'iso','snippet_directory':'/mnt/pve/iso/snippets'},'guest':{'interface':'ens18'}}}
+        profile={'config':{'pve':{'disk_storage':'raid1-ssd','snippet_storage':'iso','snippet_directory':'/mnt/pve/iso/snippets'},'guest':{'interface':'ens18','gateway':'10.254.251.1'}}}
         p=ClientPVE(MagicMock(),profile,{'id':'vm','vmid':120,'mac':'02:00:00:00:00:01','ip':'192.0.2.10','fqdn':'vps-1920210.example.net'});p.node='pve2';p.base='/nodes/pve2/qemu/120';p.config=cfg.copy();p.ssh=MagicMock();sftp=FakeSFTP({'version':1,'config':[{'mac_address':p.client['mac'],'subnets':[{'address':'192.0.2.10/32'}]}]});p.ssh.open_sftp.return_value=sftp
         state={'power':'running','imports':0,'removed':[]};calls=[]
         def api(method,path,**params):
